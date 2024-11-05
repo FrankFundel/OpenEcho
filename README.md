@@ -1,5 +1,7 @@
-# BigBAT-GUI
-GUI for BigBAT. Needs chrome, python, pip and nodejs to be installed.
+# OpenEcho
+
+First open source tool for AI-assisted bioacoustic analysis of long-term bat recordings.
+Needs chrome, python, pip and nodejs to be installed.
 
 1. Run `pip install -r requirements.txt`
 2. Run `npm install`

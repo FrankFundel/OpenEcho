@@ -302,11 +302,11 @@ def start_eel(develop):
   try:
     if develop:
         directory = 'src'
-        app = None
+        mode = None
         page = {'port': 3000}
     else:
         directory = 'build'
-        app = 'chrome'
+        mode = 'chrome'
         page = 'index.html'
 
     eel.init(directory, ['.tsx', '.ts', '.jsx', '.js', '.html'])
@@ -318,7 +318,7 @@ def start_eel(develop):
         block=False,
     )
     try:
-        eel.start(page, mode=app, **eel_kwargs)
+        eel.start(page, **eel_kwargs)
     except EnvironmentError:
         if sys.platform in ['win32', 'win64'] and int(platform.release()) >= 10:
             eel.start(page, mode='edge', **eel_kwargs)

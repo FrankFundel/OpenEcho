@@ -1,7 +1,0 @@
-eel==0.16.0
-librosa==0.10.1
-numpy==1.25.0
-scipy==1.11.3
-simpleaudio==1.0.4
-soundfile==0.12.1
-torch==2.0.1
