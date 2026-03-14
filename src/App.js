@@ -2,6 +2,7 @@ import React, { Component } from "react";
 import "./App.css";
 
 import Box from "@mui/material/Box";
+import CircularProgress from "@mui/material/CircularProgress";
 import CssBaseline from "@mui/material/CssBaseline";
 import Divider from "@mui/material/Divider";
 import ListItemIcon from "@mui/material/ListItemIcon";
@@ -186,8 +187,10 @@ export class App extends Component {
     super();
     this.state = {
       projects: [],
+      projectsLoaded: false,
       recordings: [],
       classifiers: [],
+      classifiersLoaded: false,
       selectedProject: 0,
       selectedRecording: null,
       createProjectModal: false,
@@ -272,6 +275,7 @@ export class App extends Component {
       window.clearTimeout(this.classifierLoadRetryTimer);
       this.setState((current) => ({
         classifiers,
+        classifiersLoaded: true,
         classifier:
           current.classifier || classifiers[0]?.key || "",
       }));
@@ -285,7 +289,7 @@ export class App extends Component {
     backend.get_projects()((projects) => {
       window.clearTimeout(this.projectLoadRetryTimer);
       const nextProjects = projects || [];
-      this.setState({ projects: nextProjects }, () => {
+      this.setState({ projects: nextProjects, projectsLoaded: true }, () => {
         const nextSelectedProject = Math.min(
           this.state.selectedProject,
           Math.max(nextProjects.length - 1, 0)
@@ -945,6 +949,7 @@ export class App extends Component {
       classification,
       classifier,
       classifiers,
+      classifiersLoaded,
       classifyAllLoading,
       classifyAllProgress,
       classifyLoading,
@@ -959,6 +964,7 @@ export class App extends Component {
       projectFilter,
       projectTitle,
       projects,
+      projectsLoaded,
       recordingData,
       recordingLoading,
       recordingLocation,
@@ -982,6 +988,33 @@ export class App extends Component {
       classification,
       classifiers
     );
+    const isStartupLoading = !projectsLoaded || !classifiersLoaded;
+    const startupMessage = !projectsLoaded && !classifiersLoaded
+      ? "Starting backend"
+      : !classifiersLoaded
+        ? "Preparing classifier models"
+        : "Preparing projects";
+
+    if (isStartupLoading) {
+      return (
+        <ThemeProvider theme={darkTheme}>
+          <CssBaseline />
+          <Box className="loadingScreen">
+            <Box className="loadingCard">
+              <Box className="loadingBrand">OpenEcho</Box>
+              <CircularProgress size={34} thickness={4} />
+              <Typography variant="h6" className="loadingText">
+                {startupMessage}
+              </Typography>
+              <Typography variant="body2" className="loadingHint">
+                The desktop app is still warming up. This can take a moment on the
+                first launch.
+              </Typography>
+            </Box>
+          </Box>
+        </ThemeProvider>
+      );
+    }
 
     const normalizedProjectFilter = projectFilter.trim().toLowerCase();
     const filteredProjects = projects

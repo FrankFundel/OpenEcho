@@ -23,6 +23,54 @@ body {
   min-height: 0;
 }
 
+.loadingScreen {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background:
+    radial-gradient(
+      circle at top,
+      rgba(var(--accent-lightblue-rgb), 0.22),
+      transparent 38%
+    ),
+    linear-gradient(180deg, #15181c 0%, #101215 100%);
+}
+
+.loadingCard {
+  width: min(440px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: 36px 32px;
+  text-align: center;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  background:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.06),
+      rgba(255, 255, 255, 0.03)
+    );
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+}
+
+.loadingBrand {
+  font-size: 32px;
+  font-weight: 700;
+}
+
+.loadingText {
+  margin: 0;
+}
+
+.loadingHint {
+  max-width: 28ch;
+  color: rgba(255, 255, 255, 0.72);
+}
+
 .appLayout {
   display: flex;
   height: 100%;
