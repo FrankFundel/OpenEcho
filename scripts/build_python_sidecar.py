@@ -7,30 +7,19 @@ BUILD_DIR = ROOT / "build-pyinstaller"
 DIST_DIR = ROOT / "dist-pyinstaller"
 EXCLUDED_MODULES = [
   "botocore",
-  "bokeh",
   "cv2",
   "gevent",
   "IPython",
   "jax",
   "jaxlib",
   "jedi",
-  "jsonschema",
-  "jsonschema_specifications",
-  "jupyter_client",
-  "jupyter_core",
   "keras",
-  "matplotlib",
-  "nbconvert",
-  "nbformat",
   "nltk",
   "onnx",
   "onnxruntime",
   "openpyxl",
-  "pandas",
-  "panel",
   "playwright",
   "plotly",
-  "sklearn",
   "sqlalchemy",
   "tensorboard",
   "tensorflow",
@@ -38,7 +27,6 @@ EXCLUDED_MODULES = [
   "tensorflow_io_gcs_filesystem",
   "timm",
   "torchvision",
-  "traitlets",
   "transformers",
   "yt_dlp",
   "zmq",
@@ -99,6 +87,7 @@ def build_binary():
   for module_name in EXCLUDED_MODULES:
     pyinstaller_args.extend(["--exclude-module", module_name])
 
+  add_data_if_exists(pyinstaller_args, ROOT / "models" / "BigBAT.pth", "models")
   pyinstaller_args.append(str(ROOT / "main.py"))
 
   PyInstaller.__main__.run(pyinstaller_args)

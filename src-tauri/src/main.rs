@@ -68,7 +68,6 @@ fn main() {
         let child = Command::new(&backend_path)
           .args(["--host", "127.0.0.1", "--port", "8420"])
           .env("OPENECHO_DATA_DIR", app_data_dir.to_string_lossy().to_string())
-          .env("OPENECHO_DISABLE_BACPIPE", "1")
           .stdout(Stdio::inherit())
           .stderr(Stdio::inherit())
           .spawn()?;

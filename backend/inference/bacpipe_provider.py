@@ -196,12 +196,12 @@ def prime_bacpipe_non_tf_compat():
 
 def get_bacpipe_model_names(classifier_only=True):
   bacpipe = load_bacpipe()
-  if bacpipe is None:
-    return []
+  model_names = []
 
-  model_names = list(bacpipe.supported_models)
-  if classifier_only:
-    model_names = [name for name in model_names if name in CLASSIFIER_MODEL_NAMES]
+  if bacpipe is not None:
+    model_names = list(bacpipe.supported_models)
+    if classifier_only:
+      model_names = [name for name in model_names if name in CLASSIFIER_MODEL_NAMES]
 
   try:
     from backend.inference.bacpipe_bat_adapter import BAT2_CHECKPOINT_PATH
@@ -221,9 +221,33 @@ def get_bacpipe_model_names(classifier_only=True):
   )
 
 
+@lru_cache(maxsize=None)
+def model_runtime_available(model_name):
+  if model_name == "bat2":
+    try:
+      from backend.inference.bacpipe_bat_adapter import BAT2_CHECKPOINT_PATH
+    except Exception:
+      return False
+    return bool(BAT2_CHECKPOINT_PATH and BAT2_CHECKPOINT_PATH.is_file())
+
+  if load_bacpipe() is None:
+    return False
+
+  if model_name in TENSORFLOW_MODEL_NAMES:
+    try:
+      resolve_runtime(model_name)
+    except RuntimeError:
+      return False
+
+  return True
+
+
 def get_bacpipe_classifiers():
   classifiers = []
   for model_name in get_bacpipe_model_names(classifier_only=True):
+    if not model_runtime_available(model_name):
+      continue
+
     classes = []
     classes_short = []
 
