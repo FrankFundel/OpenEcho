@@ -21,7 +21,7 @@
     "start:frontend": "react-scripts start",
     "start:backend": "python main.py --reload --port 8420",
     "build": "react-scripts build",
-    "build:backend-binary": "python scripts/build_python_sidecar.py",
+    "build:backend-binary": "node scripts/run_python_sidecar_build.mjs",
     "build:tauri": "npm run build && npm run build:backend-binary",
     "release:dmg": "node scripts/build_dmg.mjs",
     "tauri:dev": "node scripts/run-tauri.mjs dev",
