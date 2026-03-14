@@ -1,6 +1,6 @@
 {
   "name": "openecho",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
   "dependencies": {
     "@arction/lcjs": "^3.4.0",
@@ -23,6 +23,7 @@
     "build": "react-scripts build",
     "build:backend-binary": "python scripts/build_python_sidecar.py",
     "build:tauri": "npm run build && npm run build:backend-binary",
+    "release:dmg": "node scripts/build_dmg.mjs",
     "tauri:dev": "node scripts/run-tauri.mjs dev",
     "tauri:build": "node scripts/run-tauri.mjs build --ci --config src-tauri/tauri.bundle.conf.json",
     "test": "react-scripts test",
