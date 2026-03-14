@@ -174,6 +174,10 @@ const buildSpeciesOptions = (
 };
 
 export class App extends Component {
+  classifierLoadRetryTimer = null;
+
+  projectLoadRetryTimer = null;
+
   handleDocumentContextMenu = (event) => {
     event.preventDefault();
   };
@@ -236,25 +240,50 @@ export class App extends Component {
     document.addEventListener("contextmenu", this.handleDocumentContextMenu);
 
     this.loadProjects();
-    backend.get_classifiers()((classifiers) =>
-      this.setState((current) => ({
-        classifiers,
-        classifier:
-          current.classifier || classifiers[0]?.key || "",
-      }))
-    );
+    this.loadClassifiers();
   }
 
   componentWillUnmount() {
     document.removeEventListener("contextmenu", this.handleDocumentContextMenu);
+    window.clearTimeout(this.classifierLoadRetryTimer);
+    window.clearTimeout(this.projectLoadRetryTimer);
   }
 
   openAlert = (title, text) => {
     this.setState({ alertDialog: { title, text } });
   };
 
+  retryLoadClassifiers = () => {
+    window.clearTimeout(this.classifierLoadRetryTimer);
+    this.classifierLoadRetryTimer = window.setTimeout(() => {
+      this.loadClassifiers();
+    }, 1500);
+  };
+
+  retryLoadProjects = () => {
+    window.clearTimeout(this.projectLoadRetryTimer);
+    this.projectLoadRetryTimer = window.setTimeout(() => {
+      this.loadProjects();
+    }, 1500);
+  };
+
+  loadClassifiers = () => {
+    backend.get_classifiers()((classifiers) => {
+      window.clearTimeout(this.classifierLoadRetryTimer);
+      this.setState((current) => ({
+        classifiers,
+        classifier:
+          current.classifier || classifiers[0]?.key || "",
+      }));
+    }).catch((error) => {
+      console.error("Failed to load classifiers", error);
+      this.retryLoadClassifiers();
+    });
+  };
+
   loadProjects = () => {
     backend.get_projects()((projects) => {
+      window.clearTimeout(this.projectLoadRetryTimer);
       const nextProjects = projects || [];
       this.setState({ projects: nextProjects }, () => {
         const nextSelectedProject = Math.min(
@@ -263,6 +292,9 @@ export class App extends Component {
         );
         this.selectProject(nextSelectedProject);
       });
+    }).catch((error) => {
+      console.error("Failed to load projects", error);
+      this.retryLoadProjects();
     });
   };
 

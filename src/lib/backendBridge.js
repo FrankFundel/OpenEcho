@@ -49,7 +49,7 @@ class BackendBridge {
     this.healthPromise = (async () => {
       let lastError = null;
 
-      for (let attempt = 0; attempt < 40; attempt += 1) {
+      for (let attempt = 0; attempt < 120; attempt += 1) {
         try {
           const response = await fetch(`${API_BASE}/health`);
           if (response.ok) {
@@ -59,7 +59,7 @@ class BackendBridge {
         } catch (error) {
           lastError = error;
         }
-        await sleep(250);
+        await sleep(500);
       }
 
       throw lastError || new Error("Backend is unavailable.");
