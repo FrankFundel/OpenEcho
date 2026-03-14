@@ -1,297 +1,69 @@
-import React, { Component, PureComponent } from "react";
-import { Map, GoogleApiWrapper, Marker } from "google-maps-react";
+import React from "react";
+import Box from "@mui/material/Box";
+import Link from "@mui/material/Link";
 
-const mapStyle = [
-  {
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#1d2c4d",
-      },
-    ],
-  },
-  {
-    elementType: "labels",
-    stylers: [
-      {
-        visibility: "on",
-      },
-    ],
-  },
-  {
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#8ec3b9",
-      },
-    ],
-  },
-  {
-    elementType: "labels.text.stroke",
-    stylers: [
-      {
-        color: "#1a3646",
-      },
-    ],
-  },
-  {
-    featureType: "administrative.country",
-    elementType: "geometry.stroke",
-    stylers: [
-      {
-        color: "#4b6878",
-      },
-    ],
-  },
-  {
-    featureType: "administrative.land_parcel",
-    stylers: [
-      {
-        visibility: "off",
-      },
-    ],
-  },
-  {
-    featureType: "administrative.land_parcel",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#64779e",
-      },
-    ],
-  },
-  {
-    featureType: "administrative.neighborhood",
-    stylers: [
-      {
-        visibility: "off",
-      },
-    ],
-  },
-  {
-    featureType: "administrative.province",
-    elementType: "geometry.stroke",
-    stylers: [
-      {
-        color: "#4b6878",
-      },
-    ],
-  },
-  {
-    featureType: "landscape.man_made",
-    elementType: "geometry.stroke",
-    stylers: [
-      {
-        color: "#334e87",
-      },
-    ],
-  },
-  {
-    featureType: "landscape.natural",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#023e58",
-      },
-    ],
-  },
-  {
-    featureType: "poi",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#283d6a",
-      },
-    ],
-  },
-  {
-    featureType: "poi",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#6f9ba5",
-      },
-    ],
-  },
-  {
-    featureType: "poi",
-    elementType: "labels.text.stroke",
-    stylers: [
-      {
-        color: "#1d2c4d",
-      },
-    ],
-  },
-  {
-    featureType: "poi.park",
-    elementType: "geometry.fill",
-    stylers: [
-      {
-        color: "#023e58",
-      },
-    ],
-  },
-  {
-    featureType: "poi.park",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#3C7680",
-      },
-    ],
-  },
-  {
-    featureType: "road",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#304a7d",
-      },
-    ],
-  },
-  {
-    featureType: "road",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#98a5be",
-      },
-    ],
-  },
-  {
-    featureType: "road",
-    elementType: "labels.text.stroke",
-    stylers: [
-      {
-        color: "#1d2c4d",
-      },
-    ],
-  },
-  {
-    featureType: "road.highway",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#2c6675",
-      },
-    ],
-  },
-  {
-    featureType: "road.highway",
-    elementType: "geometry.stroke",
-    stylers: [
-      {
-        color: "#255763",
-      },
-    ],
-  },
-  {
-    featureType: "road.highway",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#b0d5ce",
-      },
-    ],
-  },
-  {
-    featureType: "road.highway",
-    elementType: "labels.text.stroke",
-    stylers: [
-      {
-        color: "#023e58",
-      },
-    ],
-  },
-  {
-    featureType: "transit",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#98a5be",
-      },
-    ],
-  },
-  {
-    featureType: "transit",
-    elementType: "labels.text.stroke",
-    stylers: [
-      {
-        color: "#1d2c4d",
-      },
-    ],
-  },
-  {
-    featureType: "transit.line",
-    elementType: "geometry.fill",
-    stylers: [
-      {
-        color: "#283d6a",
-      },
-    ],
-  },
-  {
-    featureType: "transit.station",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#3a4762",
-      },
-    ],
-  },
-  {
-    featureType: "water",
-    elementType: "geometry",
-    stylers: [
-      {
-        color: "#0e1626",
-      },
-    ],
-  },
-  {
-    featureType: "water",
-    elementType: "labels.text.fill",
-    stylers: [
-      {
-        color: "#4e6d70",
-      },
-    ],
-  },
-];
+const clampLatitude = (value) => Math.max(-85, Math.min(85, value));
+const clampLongitude = (value) => Math.max(-180, Math.min(180, value));
 
-export class MapContainer extends PureComponent {
-  mapLoaded(mapProps, map) {
-    map.setOptions({
-      styles: mapStyle,
-    });
-  }
+const buildBounds = (lat, lng) => {
+  const latitude = clampLatitude(lat);
+  const longitude = clampLongitude(lng);
+  const delta = 0.02;
+  const left = clampLongitude(longitude - delta);
+  const right = clampLongitude(longitude + delta);
+  const bottom = clampLatitude(latitude - delta);
+  const top = clampLatitude(latitude + delta);
+  return { left, right, bottom, top };
+};
 
-  render() {
-    return (
-      <Map
-        google={this.props.google}
-        zoom={14}
-        center={this.props.center}
-        style={this.props.style}
-        containerStyle={this.props.style}
-        onReady={(mapProps, map) => this.mapLoaded(mapProps, map)}
-        zoomControl={false}
-        mapTypeControl={false}
-        scaleControl={false}
-        streetViewControl={false}
-        panControl={false}
-        rotateControl={false}
-        fullscreenControl={false}
+const MapContainer = ({ center, style }) => {
+  const latitude = Number(center?.lat) || 0;
+  const longitude = Number(center?.lng) || 0;
+  const bounds = buildBounds(latitude, longitude);
+  const embedUrl =
+    "https://www.openstreetmap.org/export/embed.html" +
+    `?bbox=${bounds.left}%2C${bounds.bottom}%2C${bounds.right}%2C${bounds.top}` +
+    `&layer=mapnik&marker=${latitude}%2C${longitude}`;
+  const openStreetMapUrl =
+    `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}` +
+    `#map=14/${latitude}/${longitude}`;
+
+  return (
+    <Box sx={{ position: "relative", width: "100%", height: "100%", ...style }}>
+      <iframe
+        title="Recording location"
+        src={embedUrl}
+        style={{
+          border: 0,
+          width: "100%",
+          height: "100%",
+          borderRadius: 16,
+        }}
+        loading="lazy"
+        referrerPolicy="no-referrer-when-downgrade"
+      />
+      <Link
+        href={openStreetMapUrl}
+        target="_blank"
+        rel="noreferrer"
+        underline="hover"
+        sx={{
+          position: "absolute",
+          right: 12,
+          bottom: 12,
+          px: 1,
+          py: 0.5,
+          borderRadius: 999,
+          fontSize: 12,
+          color: "common.white",
+          bgcolor: "rgba(12, 16, 20, 0.72)",
+          backdropFilter: "blur(8px)",
+        }}
       >
-        <Marker
-          title={"The location of the recording"}
-          position={this.props.center}
-        />
-      </Map>
-    );
-  }
-}
+        OpenStreetMap
+      </Link>
+    </Box>
+  );
+};
 
-export default GoogleApiWrapper({
-  apiKey: "AIzaSyCElG1zur7XZ6OfkxeoqzkJz8Wj--lEGr4",
-})(MapContainer);
+export default MapContainer;

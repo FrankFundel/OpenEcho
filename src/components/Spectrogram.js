@@ -5,7 +5,6 @@ import {
   emptyFill,
   emptyLine,
   AxisScrollStrategies,
-  LegendBoxBuilders,
   ColorHSV,
   translatePoint,
   synchronizeAxisIntervals,
@@ -16,20 +15,43 @@ import {
   SolidLine,
   customTheme,
 } from "@arction/lcjs";
-import React, { useRef, useEffect, useState } from "react";
+import React, { useRef, useEffect } from "react";
+
+const LIGHTBLUE = "#66C0B7";
+
+const PLAYHEAD_VISIBLE_STYLE = new SolidLine({
+  thickness: 2,
+  fillStyle: new SolidFill({ color: ColorCSS("rgba(255, 255, 255, 0.78)") }),
+});
+
+const PLAYHEAD_HIDDEN_STYLE = new SolidLine({
+  thickness: 2,
+  fillStyle: new SolidFill({ color: ColorCSS("rgba(255, 255, 255, 0)") }),
+});
 
 const Spectrogram = (props) => {
-  const { data, waveData, id, maxF, maxS, init } = props;
+  const {
+    data,
+    waveData,
+    id,
+    init,
+    duration,
+    samplerate,
+    offset,
+    playbackCursor,
+    loadData,
+    loadMore,
+    maxF,
+    maxS,
+  } = props;
   const chartRef = useRef(undefined);
-
-  var loading = false;
+  const loadingRef = useRef(false);
+  const playheadAnimationRef = useRef(null);
 
   useEffect(() => {
-    console.log("create chart");
-
     const themeTextFillStyle = new SolidFill({ color: ColorCSS("#fff") });
     const themeDataSeriesFillStyles = [
-      new SolidFill({ color: ColorCSS("#42a5f5") }),
+      new SolidFill({ color: ColorCSS(LIGHTBLUE) }),
       new SolidFill({ color: ColorCSS("#fff") }),
     ];
     const themeAxisFillStyle = new SolidFill({
@@ -281,6 +303,20 @@ const Spectrogram = (props) => {
       .setValueEnd(10)
       .setName("X Axis Band");
 
+    const playheadSpectrogram = chartSpectrogram
+      .getDefaultAxisX()
+      .addConstantLine()
+      .setMouseInteractions(false)
+      .setValue(0)
+      .setStrokeStyle(PLAYHEAD_HIDDEN_STYLE);
+
+    const playheadProjectionX = chartProjectionX
+      .getDefaultAxisX()
+      .addConstantLine()
+      .setMouseInteractions(false)
+      .setValue(0)
+      .setStrokeStyle(PLAYHEAD_HIDDEN_STYLE);
+
     // Align charts nicely.
     chartSpectrogram.getDefaultAxisY().setThickness(50);
     chartProjectionX.getDefaultAxisY().setThickness(50);
@@ -296,10 +332,15 @@ const Spectrogram = (props) => {
       chartProjectionX,
       chartProjectionY,
       xAxisBand,
+      playheadSpectrogram,
+      playheadProjectionX,
     };
 
     return () => {
-      console.log("destroy chart");
+      if (playheadAnimationRef.current !== null) {
+        cancelAnimationFrame(playheadAnimationRef.current);
+        playheadAnimationRef.current = null;
+      }
       dashboard.dispose();
       chartRef.current = undefined;
     };
@@ -318,19 +359,7 @@ const Spectrogram = (props) => {
       chartProjectionY,
       xAxisBand,
     } = components;
-    const {
-      maxF,
-      maxS,
-      loadMore,
-      loadData,
-      data,
-      waveData,
-      duration,
-      samplerate,
-      offset,
-    } = props;
-
-    loading = false;
+    loadingRef.current = false;
     let maxI = 255;
     seriesSpectrogram.dispose();
     seriesSpectrogram = chartSpectrogram
@@ -394,26 +423,34 @@ const Spectrogram = (props) => {
 
     chartSpectrogram.onSeriesBackgroundMouseDrag((_, event) => {
       const x = seriesSpectrogram.axisX.getInterval().end;
-      if (x > data.length + 0.25 * maxS && loading == false) {
+      if (x > data.length + 0.25 * maxS && loadingRef.current === false) {
         loadMore(data.length + offset);
-        loading = true;
+        loadingRef.current = true;
       }
     });
 
-    xAxisBand
-      .setValueStart(((offset * 128) / samplerate / duration) * waveData.length)
-      .setValueEnd(
-        (((offset + data.length) * 128) / samplerate / duration) *
-          waveData.length
-      );
+    const waveLength = waveData ? waveData.length : 0;
+    const selectionStart =
+      samplerate && duration && waveLength
+        ? ((offset * 128) / samplerate / duration) * waveLength
+        : 0;
+    const selectionEnd =
+      samplerate && duration && waveLength
+        ? (((offset + data.length) * 128) / samplerate / duration) * waveLength
+        : 0;
+
+    xAxisBand.setValueStart(selectionStart).setValueEnd(selectionEnd);
 
     xAxisBand.onMouseUp((_, event) => {
       let start = xAxisBand.getValueStart();
       let end = xAxisBand.getValueEnd();
+      if (waveLength === 0 || !duration || !samplerate) {
+        return;
+      }
       if (start < 0) start = 0;
-      if (end > waveData.length) end = waveData.length;
-      start = (start / waveData.length) * duration * samplerate;
-      end = (end / waveData.length) * duration * samplerate;
+      if (end > waveLength) end = waveLength;
+      start = (start / waveLength) * duration * samplerate;
+      end = (end / waveLength) * duration * samplerate;
       loadData(parseInt(start / 128), parseInt(end / 128));
     });
 
@@ -477,7 +514,89 @@ const Spectrogram = (props) => {
         seriesProjectionY.add(projectionY);
       }
     });
-  }, [data, waveData, chartRef]);
+  }, [
+    data,
+    waveData,
+    duration,
+    loadData,
+    loadMore,
+    maxF,
+    maxS,
+    offset,
+    samplerate,
+  ]);
+
+  useEffect(() => {
+    const components = chartRef.current;
+    if (!components) return undefined;
+
+    const { playheadSpectrogram, playheadProjectionX } = components;
+
+    const hidePlayhead = () => {
+      playheadSpectrogram.setStrokeStyle(PLAYHEAD_HIDDEN_STYLE);
+      playheadProjectionX.setStrokeStyle(PLAYHEAD_HIDDEN_STYLE);
+    };
+
+    const updatePlayhead = (frameIndex) => {
+      const localFrameIndex = frameIndex - offset;
+      playheadSpectrogram
+        .setValue(localFrameIndex)
+        .setStrokeStyle(PLAYHEAD_VISIBLE_STYLE);
+
+      if (samplerate && duration && waveData && waveData.length > 0) {
+        const wavePosition =
+          ((frameIndex * 128) / samplerate / duration) * waveData.length;
+        playheadProjectionX
+          .setValue(wavePosition)
+          .setStrokeStyle(PLAYHEAD_VISIBLE_STYLE);
+      } else {
+        playheadProjectionX.setStrokeStyle(PLAYHEAD_HIDDEN_STYLE);
+      }
+    };
+
+    if (playheadAnimationRef.current !== null) {
+      cancelAnimationFrame(playheadAnimationRef.current);
+      playheadAnimationRef.current = null;
+    }
+
+    if (
+      !playbackCursor ||
+      !Number.isFinite(playbackCursor.startFrameIndex) ||
+      !Number.isFinite(playbackCursor.endFrameIndex) ||
+      !Number.isFinite(playbackCursor.durationMs)
+    ) {
+      hidePlayhead();
+      return undefined;
+    }
+
+    const animate = () => {
+      const elapsed = performance.now() - playbackCursor.startedAtMs;
+      const progress =
+        playbackCursor.durationMs <= 0
+          ? 1
+          : Math.min(elapsed / playbackCursor.durationMs, 1);
+      const frameIndex =
+        playbackCursor.startFrameIndex +
+        (playbackCursor.endFrameIndex - playbackCursor.startFrameIndex) * progress;
+      updatePlayhead(frameIndex);
+
+      if (progress < 1) {
+        playheadAnimationRef.current = requestAnimationFrame(animate);
+      } else {
+        playheadAnimationRef.current = null;
+      }
+    };
+
+    updatePlayhead(playbackCursor.startFrameIndex);
+    playheadAnimationRef.current = requestAnimationFrame(animate);
+
+    return () => {
+      if (playheadAnimationRef.current !== null) {
+        cancelAnimationFrame(playheadAnimationRef.current);
+        playheadAnimationRef.current = null;
+      }
+    };
+  }, [duration, offset, playbackCursor, samplerate, waveData]);
 
   return <div id={id} ref={chartRef} style={{ height: "100%" }}></div>;
 };

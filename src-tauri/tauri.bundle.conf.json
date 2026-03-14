@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "../dist-pyinstaller/openecho-backend/": "python-backend/"
+    }
+  }
+}

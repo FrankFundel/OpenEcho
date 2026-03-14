@@ -2,9 +2,549 @@ html,
 body,
 #root {
   height: 100%;
+}
+
+:root {
+  --accent-lightblue: #66c0b7;
+  --accent-lightblue-rgb: 102, 192, 183;
+}
+
+body {
+  margin: 0;
   overflow: hidden;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.appRoot {
+  height: 100%;
+  min-height: 0;
+}
+
+.appLayout {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+
+.sidebarPane,
+.contentPane {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.projectPane {
+  flex: 0 0 220px;
+  min-width: 200px;
+}
+
+.recordingsPane {
+  flex: 0 0 260px;
+  min-width: 220px;
+}
+
+.mainPane {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.paneInner {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.sidebarScroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.sidebarSearch {
+  padding: 12px 12px 0;
+}
+
+.sidebarToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px 0 12px;
+}
+
+.recordingsList {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.sidebarActions {
+  padding: 12px 16px 16px;
+}
+
+.spectrogramSection {
+  position: relative;
+  flex: 1 1 52%;
+  min-height: 280px;
+  overflow: hidden;
+}
+
+.chartSurface {
+  height: 100%;
+  min-height: 0;
+}
+
+.detailsSection {
+  flex: 1 1 48%;
+  min-height: 260px;
+  overflow: hidden;
+}
+
+.detailsBody {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.recordingDetails {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) minmax(
+      280px,
+      2fr
+    );
+  gap: 20px;
+  align-items: start;
+}
+
+.metadataSpeciesRow {
+  margin-top: 4px;
+}
+
+.speciesLabelList {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.speciesLabelButton {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent-lightblue);
+  cursor: pointer;
+  font: inherit;
+  line-height: 1.4;
+  text-decoration: none;
+}
+
+.speciesLabelButtonCompact {
+  font-size: 12px;
+  line-height: 1.15;
+}
+
+.speciesLabelButtonEmpty {
+  color: rgba(255, 255, 255, 0.72);
+  text-decoration-style: dotted;
+}
+
+.speciesLabelSeparator {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 0.78em;
+}
+
+.classificationPanel {
+  height: 280px;
+  min-height: 280px;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  width: 100%;
+}
+
+.mapCard {
+  position: relative;
+  width: 100%;
+  max-width: 320px;
+  aspect-ratio: 4 / 3;
+  height: 240px;
+  min-height: 240px;
+  margin-top: 4px;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.mapCard > *,
+.classificationPanel > * {
+  width: 100%;
+  height: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.emptyPanel {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.mapPlaceholder {
+  background:
+    radial-gradient(
+      circle at top right,
+      rgba(var(--accent-lightblue-rgb), 0.18),
+      transparent 42%
+    ),
+    linear-gradient(
+      160deg,
+      rgba(255, 255, 255, 0.05),
+      rgba(255, 255, 255, 0.02)
+    );
+  text-align: center;
+  padding: 16px;
+}
+
+.featurePlaceholder {
+  padding: 20px;
+  text-align: center;
+}
+
+.projectControls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.classifierOptionLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.providerChip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.08);
+  text-transform: lowercase;
+}
+
+.recordingMetaLine {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  line-height: 1.1;
+}
+
+.recordingListItemText {
+  margin-top: 3px;
+  margin-bottom: 3px;
+}
+
+.recordingDateText {
+  flex: 0 0 auto;
+  font-size: 9px;
+  line-height: 1.1;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.recordingSpeciesPreview {
+  min-width: 0;
+  overflow: hidden;
+  flex-wrap: nowrap;
+}
+
+.recordingSpeciesPreview .speciesLabelButton {
+  white-space: nowrap;
+}
+
+.speciesDialogContent {
+  padding-top: 8px !important;
+}
+
+.speciesDialogLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+  gap: 16px;
+  min-height: 460px;
+}
+
+.speciesDialogColumn {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  gap: 12px;
+}
+
+.speciesDialogToolbar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.speciesDialogSearchRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.speciesSelectedChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.speciesDialogCount {
+  flex: 0 0 auto;
+}
+
+.speciesOptionsList {
+  flex: 1 1 auto;
+  min-height: 300px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.speciesOptionRow {
+  padding-left: 8px !important;
+  padding-right: 12px !important;
+}
+
+.speciesOptionRow.Mui-selected {
+  background: rgba(var(--accent-lightblue-rgb), 0.18) !important;
+}
+
+.speciesOptionRow.Mui-selected:hover {
+  background: rgba(var(--accent-lightblue-rgb), 0.26) !important;
+}
+
+.speciesOptionPrimary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.speciesOptionFocusHint {
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.58);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.speciesOptionTitle {
+  font-weight: 500;
+}
+
+.speciesOptionMeta {
+  display: inline-block;
+  margin-top: 2px;
+  font-size: 0.78rem;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.speciesDialogEmptyState {
+  min-height: 300px;
+  padding: 20px;
+  text-align: center;
+}
+
+.speciesWikiCard {
+  flex: 1 1 auto;
+  min-height: 300px;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background:
+    radial-gradient(
+      circle at top right,
+      rgba(var(--accent-lightblue-rgb), 0.14),
+      transparent 36%
+    ),
+    linear-gradient(
+      160deg,
+      rgba(255, 255, 255, 0.05),
+      rgba(255, 255, 255, 0.02)
+    );
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.speciesWikiHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.speciesWikiTitleBlock {
+  min-width: 0;
+}
+
+.speciesWikiTitleRow {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.speciesWikiShortName {
+  white-space: nowrap;
+}
+
+.speciesWikiScientificName {
+  margin-top: 2px;
+  font-style: italic;
+}
+
+.speciesWikiThumbnail {
+  width: 100%;
+  max-height: 180px;
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+.speciesWikiCaption {
+  font-style: italic;
+}
+
+.speciesWikiStatus {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.spectrogramControls {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.expansionSelect {
+  min-width: 60px;
+}
+
+.playButton {
+  border: 1px solid rgba(var(--accent-lightblue-rgb), 0.45);
+  background: rgba(var(--accent-lightblue-rgb), 0.12);
+}
+
+.loadingOverlay {
+  width: 100%;
+  height: 100%;
+}
+
+.loadingSpinner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
 }
 
 .bluredForm {
   height: 100%;
+}
+
+@media (max-width: 1200px) {
+  .projectPane {
+    flex-basis: 200px;
+    min-width: 180px;
+  }
+
+  .recordingsPane {
+    flex-basis: 220px;
+    min-width: 200px;
+  }
+
+  .recordingDetails {
+    grid-template-columns: repeat(2, minmax(220px, 1fr));
+  }
+
+  .classificationPanel {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 900px) {
+  body {
+    overflow: auto;
+  }
+
+  .appRoot {
+    min-height: 100%;
+  }
+
+  .appLayout {
+    flex-direction: column;
+    height: auto;
+    min-height: 100%;
+  }
+
+  .desktopDivider {
+    display: none;
+  }
+
+  .sidebarPane {
+    min-height: 280px;
+  }
+
+  .contentPane {
+    min-height: 900px;
+  }
+
+  .projectPane,
+  .recordingsPane,
+  .mainPane {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .recordingDetails {
+    grid-template-columns: 1fr;
+  }
+
+  .mapCard {
+    max-width: none;
+  }
+
+  .speciesDialogLayout {
+    grid-template-columns: 1fr;
+    min-height: auto;
+  }
+
+  .speciesOptionsList,
+  .speciesDialogEmptyState,
+  .speciesWikiCard {
+    min-height: 240px;
+  }
 }

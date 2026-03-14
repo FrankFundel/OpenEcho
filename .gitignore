@@ -1,22 +1,28 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
-# dependencies
-/node_modules
-/dist
-/__pycache__
-/.pnp
+node_modules/
+build/
+dist/
+coverage/
+.pnp
 .pnp.js
-/models/__pycache__
+
+.openecho/
+.bacpipe/
+bacpipe/
+.venv/
+.venv-tf/
+__pycache__/
+*.py[cod]
 *.spec
 
-# testing
-/coverage
+build-pyinstaller/
+dist-pyinstaller/
+src-tauri/binaries/
+src-tauri/gen/
+src-tauri/target/
 
-# production
-/build
-
-# misc
 .DS_Store
+.idea/
+.vscode/
 .env.local
 .env.development.local
 .env.test.local

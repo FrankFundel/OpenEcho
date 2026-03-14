@@ -1,61 +1,33 @@
 import React, { Component } from "react";
 import "./App.css";
 
-import List from "@mui/material/List";
-import ListItem from "@mui/material/ListItem";
-import Divider from "@mui/material/Divider";
-import ListItemText from "@mui/material/ListItemText";
-import ListItemAvatar from "@mui/material/ListItemAvatar";
-import Avatar from "@mui/material/Avatar";
-import Typography from "@mui/material/Typography";
-import ListItemButton from "@mui/material/ListItemButton";
-import ListItemIcon from "@mui/material/ListItemIcon";
-import Button from "@mui/material/Button";
-import Container from "@mui/material/Container";
-import Grid from "@mui/material/Grid";
 import Box from "@mui/material/Box";
-import TextField from "@mui/material/TextField";
-import Dialog from "@mui/material/Dialog";
-import DialogActions from "@mui/material/DialogActions";
-import DialogContent from "@mui/material/DialogContent";
-import DialogContentText from "@mui/material/DialogContentText";
-import DialogTitle from "@mui/material/DialogTitle";
+import CssBaseline from "@mui/material/CssBaseline";
+import Divider from "@mui/material/Divider";
+import ListItemIcon from "@mui/material/ListItemIcon";
+import ListItemText from "@mui/material/ListItemText";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
-import Badge from "@mui/material/Badge";
-import Checkbox from "@mui/material/Checkbox";
-import Tabs from "@mui/material/Tabs";
-import Tab from "@mui/material/Tab";
-import Select from "@mui/material/Select";
-import Fade from "@mui/material/Fade";
-import CircularProgress from "@mui/material/CircularProgress";
+import Typography from "@mui/material/Typography";
 import { ThemeProvider, createTheme } from "@mui/material/styles";
-import CssBaseline from "@mui/material/CssBaseline";
-import moment from "moment";
-import MapContainer from "./components/MapContainer";
-import { FixedSizeList } from "react-window";
-import BackdropFilter from "react-backdrop-filter";
-import LoadingButton from "@mui/lab/LoadingButton";
-import FormControlLabel from "@mui/material/FormControlLabel";
-import IconButton from "@mui/material/IconButton";
 
-import FolderIcon from "@mui/icons-material/Folder";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import EditOutlineIcon from "@mui/icons-material/EditOutlined";
-import MoreVertIcon from "@mui/icons-material/MoreVert";
-import ThinkIcon from "@mui/icons-material/AutoFixHighOutlined";
 import ExportOutlineIcon from "@mui/icons-material/FileDownloadOutlined";
+import ThinkIcon from "@mui/icons-material/AutoFixHighOutlined";
 
-import Spectrogram from "./components/Spectrogram";
-import BarChart from "./components/BarChart";
-import { FormControl, InputLabel, Link, OutlinedInput } from "@mui/material";
-
-export const eel = window.eel;
-eel.set_host("ws://localhost:8080");
+import AppDialogs from "./components/AppDialogs";
+import MainContent from "./components/MainContent";
+import ProjectSidebar from "./components/ProjectSidebar";
+import RecordingSidebar from "./components/RecordingSidebar";
+import { backend } from "./lib/backendBridge";
 
 const darkTheme = createTheme({
   palette: {
     mode: "dark",
+    primary: {
+      main: "#66C0B7",
+    },
   },
   components: {
     MuiCssBaseline: {
@@ -92,7 +64,120 @@ const darkTheme = createTheme({
   },
 });
 
+const EMPTY_RECORDING = {
+  title: "",
+  date: 0,
+  temperature: 0,
+  duration: 0,
+  samplerate: 0,
+  path: "",
+  location: {
+    latitude: 0,
+    longitude: 0,
+  },
+  class: "",
+  species: "",
+};
+
+const splitSpeciesText = (value) =>
+  value
+    ? value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    : [];
+
+const findClassifierByKey = (classifiers, classifierKey) =>
+  classifiers.find((item) => item.key === classifierKey) || null;
+
+const resolveClassificationMetadata = (classification, classifiers) => {
+  if (
+    !classification ||
+    (
+      !Array.isArray(classification.prediction) &&
+      !classification.classifier_key
+    ) ||
+    (
+      Array.isArray(classification.prediction) &&
+      classification.prediction.length === 0 &&
+      !classification.classifier_key
+    )
+  ) {
+    return classification;
+  }
+
+  const classifierConfig = findClassifierByKey(
+    classifiers,
+    classification.classifier_key
+  );
+  if (!classifierConfig) {
+    return classification;
+  }
+
+  return {
+    ...classification,
+    classes: classifierConfig.classes || [],
+    classes_short: classifierConfig.classes_short || [],
+  };
+};
+
+const buildSpeciesOptions = (
+  classification,
+  classifierConfig,
+  selectedSpecies = []
+) => {
+  const classes =
+    classification && Array.isArray(classification.classes)
+      ? classification.classes
+      : classifierConfig && Array.isArray(classifierConfig.classes)
+        ? classifierConfig.classes
+        : [];
+  const classesShort =
+    classification && Array.isArray(classification.classes_short)
+      ? classification.classes_short
+      : classifierConfig && Array.isArray(classifierConfig.classes_short)
+        ? classifierConfig.classes_short
+        : [];
+
+  const optionMap = new Map();
+  const total = Math.max(classes.length, classesShort.length);
+
+  for (let index = 0; index < total; index += 1) {
+    const fullLabel = classes[index] || classesShort[index];
+    const shortLabel = classesShort[index] || classes[index];
+    const value = shortLabel || fullLabel;
+
+    if (!value || optionMap.has(value)) {
+      continue;
+    }
+
+    optionMap.set(value, {
+      value,
+      shortLabel,
+      fullLabel,
+    });
+  }
+
+  selectedSpecies.forEach((value) => {
+    if (!value || optionMap.has(value)) {
+      return;
+    }
+
+    optionMap.set(value, {
+      value,
+      shortLabel: value,
+      fullLabel: value,
+    });
+  });
+
+  return Array.from(optionMap.values());
+};
+
 export class App extends Component {
+  handleDocumentContextMenu = (event) => {
+    event.preventDefault();
+  };
+
   constructor() {
     super();
     this.state = {
@@ -100,107 +185,267 @@ export class App extends Component {
       recordings: [],
       classifiers: [],
       selectedProject: 0,
+      selectedRecording: null,
       createProjectModal: false,
       projectTitle: "",
       projectDescription: "",
       projectContext: null,
       projectContextSelection: 0,
-      recordingIndex: 0,
       selectedRecordings: [],
       specData: [],
       waveData: [],
       classification: null,
       tabValue: 1,
       specTabValue: 0,
-      recordingData: {
-        title: "",
-        date: 0,
-        temperature: 0,
-        location: {
-          latitude: 0,
-          longitude: 0,
-        },
-        class: "",
-      },
+      recordingData: EMPTY_RECORDING,
       recordingLocation: {
         lat: 0,
         lng: 0,
       },
-      classifier: 0,
+      classifier: "",
       specLoading: false,
+      classifyLoading: false,
       editProject: false,
       classifyAllProgress: 0,
       classifyAllLoading: false,
       recordingsMenu: null,
       recordingLoading: null,
+      projectFilter: "",
+      recordingFilter: "",
+      confirmDeleteDialog: null,
       fileNotFoundDialog: false,
-      maximumProcessingLength: 0,
-      speciesDialog: false,
-      species: [],
+      alertDialog: null,
+      processingMode: "full",
+      speciesDialog: null,
       specStart: 0,
       specEnd: 0,
       playPause: false,
+      playbackCursor: null,
+      expansionRate: 10.0,
     };
 
-    window.eel.expose(this.classifiedRecording, "classifiedRecording");
-    window.eel.expose(this.setRecordingLoading, "setRecordingLoading");
-    window.eel.expose(this.setRecording, "setRecording");
-    window.eel.expose(this.memoryError, "memoryError");
-    window.eel.expose(this.playEnd, "playEnd");
+    backend.expose(this.classifiedRecording, "classifiedRecording");
+    backend.expose(this.setRecordingLoading, "setRecordingLoading");
+    backend.expose(this.setRecording, "setRecording");
+    backend.expose(this.memoryError, "memoryError");
+    backend.expose(this.playEnd, "playEnd");
+    backend.expose(this.classificationError, "classificationError");
   }
 
   componentDidMount() {
-    document.addEventListener("contextmenu", (e) => {
-      let isDev = "_self" in React.createElement("div");
-      if (!isDev) {
-        e.preventDefault();
-      }
-    });
+    document.addEventListener("contextmenu", this.handleDocumentContextMenu);
 
     this.loadProjects();
-
-    eel.get_classifiers()((classifiers) => this.setState({ classifiers }));
+    backend.get_classifiers()((classifiers) =>
+      this.setState((current) => ({
+        classifiers,
+        classifier:
+          current.classifier || classifiers[0]?.key || "",
+      }))
+    );
   }
 
+  componentWillUnmount() {
+    document.removeEventListener("contextmenu", this.handleDocumentContextMenu);
+  }
+
+  openAlert = (title, text) => {
+    this.setState({ alertDialog: { title, text } });
+  };
+
   loadProjects = () => {
-    eel.get_projects()((projects) => {
-      this.setState({ projects: projects || [] }, () => {
-        this.selectProject(this.state.selectedProject);
+    backend.get_projects()((projects) => {
+      const nextProjects = projects || [];
+      this.setState({ projects: nextProjects }, () => {
+        const nextSelectedProject = Math.min(
+          this.state.selectedProject,
+          Math.max(nextProjects.length - 1, 0)
+        );
+        this.selectProject(nextSelectedProject);
       });
     });
+  };
+
+  resetRecordingState = () => {
+    this.setState({
+      selectedRecordings: [],
+      selectedRecording: null,
+      recordingData: EMPTY_RECORDING,
+      recordingLocation: { lat: 0, lng: 0 },
+      classification: null,
+      specData: [],
+      waveData: [],
+      playPause: false,
+      playbackCursor: null,
+      classifyLoading: false,
+      classifyAllProgress: 0,
+      classifyAllLoading: false,
+      recordingLoading: null,
+      speciesDialog: null,
+    });
+  };
+
+  getEffectivePlaybackRange = () => {
+    const { specStart, specEnd, specData } = this.state;
+    const start = specStart || 0;
+    const fallbackEnd = start + (specData ? specData.length : 0);
+    const end = specEnd > start ? specEnd : fallbackEnd;
+    return { start, end };
   };
 
   selectProject = (projectIndex) => {
     const { projects } = this.state;
-    if (!projects[projectIndex]) {
-      this.setState({
-        recordings: [],
-      });
+    const project = projects[projectIndex];
+
+    if (!project) {
+      this.setState(
+        {
+          recordings: [],
+          classifier: "",
+          processingMode: "full",
+        },
+        this.resetRecordingState
+      );
       return;
     }
 
-    this.setState({
-      recordings: projects[projectIndex].recordings,
-      classifier: projects[projectIndex].classifier,
-      maximumProcessingLength: projects[projectIndex].maxproclen,
-      selectedProject: projectIndex,
-    });
+    this.setState(
+      {
+        recordings: project.recordings || [],
+        classifier: project.classifier || "",
+        processingMode: project.processing_mode || "full",
+        selectedProject: projectIndex,
+      },
+      this.resetRecordingState
+    );
   };
 
   createProject = () => {
-    this.setState({ createProjectModal: false });
     const { projectTitle, projectDescription } = this.state;
-    eel.add_project(
+    this.setState({ createProjectModal: false });
+    backend.add_project(projectTitle, projectDescription)(this.loadProjects);
+  };
+
+  saveProject = () => {
+    const { projectContextSelection, projectTitle, projectDescription } =
+      this.state;
+    this.setState({ createProjectModal: false });
+    backend.save_project(
+      projectContextSelection,
       projectTitle,
       projectDescription
-    )(() => {
-      this.loadProjects();
+    )(this.loadProjects);
+  };
+
+  removeProject = () => {
+    this.setState({ projectContext: null });
+    backend.remove_project(this.state.projectContextSelection)(this.loadProjects);
+  };
+
+  openDeleteProjectDialog = () => {
+    const { projects, projectContextSelection } = this.state;
+    const project = projects[projectContextSelection];
+    this.setState({
+      projectContext: null,
+      confirmDeleteDialog: {
+        title: "Delete project?",
+        text: project
+          ? `Delete "${project.title}" and all recordings inside it?`
+          : "Delete this project?",
+        onConfirm: this.removeProject,
+      },
+    });
+  };
+
+  editProject = () => {
+    const { projects, projectContextSelection } = this.state;
+    const project = projects[projectContextSelection];
+
+    this.setState({
+      projectContext: null,
+      createProjectModal: true,
+      projectTitle: project.title,
+      projectDescription: project.description,
+      editProject: true,
     });
   };
 
   addRecordings = () => {
-    eel.add_recordings(this.state.selectedProject)(() => {
+    backend.add_recordings(this.state.selectedProject)((result) => {
       this.loadProjects();
+      if (!result) {
+        return;
+      }
+      if (result.metadata_files > 0) {
+        this.openAlert(
+          "Imported metadata",
+          `Loaded ${result.metadata_files} metadata file(s) and matched ${result.matched_recordings} recording(s).`
+        );
+      }
+    });
+  };
+
+  removeRecordings = () => {
+    const { selectedRecordings, selectedProject } = this.state;
+    if (selectedRecordings.length === 0) {
+      return;
+    }
+
+    this.setState({ recordingsMenu: null });
+    backend.remove_recordings(selectedProject, selectedRecordings)(() => {
+      this.loadProjects();
+      this.setState({ selectedRecordings: [] });
+    });
+  };
+
+  openDeleteRecordingsDialog = () => {
+    const count = this.state.selectedRecordings.length;
+    this.setState({
+      recordingsMenu: null,
+      confirmDeleteDialog: {
+        title: "Delete recordings?",
+        text:
+          count === 1
+            ? "Delete the selected recording?"
+            : `Delete ${count} selected recordings?`,
+        onConfirm: this.removeRecordings,
+      },
+    });
+  };
+
+  openRecordingsMenu = (event, recordingIndex = null) => {
+    if (event && event.preventDefault) {
+      event.preventDefault();
+    }
+    const anchorEl = event?.currentTarget || null;
+    const mouseX =
+      typeof event?.clientX === "number" ? event.clientX + 2 : null;
+    const mouseY =
+      typeof event?.clientY === "number" ? event.clientY - 6 : null;
+
+    this.setState((current) => {
+      const nextSelectedRecordings =
+        recordingIndex == null
+          ? current.selectedRecordings
+          : current.selectedRecordings.includes(recordingIndex)
+            ? current.selectedRecordings
+            : [recordingIndex];
+
+      return {
+        selectedRecordings: nextSelectedRecordings,
+        recordingsMenu:
+          recordingIndex == null
+            ? {
+                anchorEl,
+                mouseX: null,
+                mouseY: null,
+              }
+            : {
+                anchorEl: null,
+                mouseX,
+                mouseY,
+              },
+      };
     });
   };
 
@@ -218,70 +463,6 @@ export class App extends Component {
     });
   };
 
-  removeProject = () => {
-    this.setState({ projectContext: null });
-    eel.remove_project(this.state.projectContextSelection)(() => {
-      this.loadProjects();
-    });
-  };
-
-  saveProject = () => {
-    this.setState({ createProjectModal: false });
-    const { projectTitle, projectDescription, projectContextSelection } =
-      this.state;
-    eel.save_project(
-      projectContextSelection,
-      projectTitle,
-      projectDescription
-    )(() => {
-      this.loadProjects();
-    });
-  };
-
-  editProject = () => {
-    const { projects, projectContextSelection } = this.state;
-    const project = projects[projectContextSelection];
-
-    this.setState({
-      projectContext: null,
-      createProjectModal: true,
-      projectTitle: project.title,
-      projectDescription: project.description,
-      editProject: true,
-    });
-  };
-
-  removeRecordings = () => {
-    const { selectedRecordings, selectedProject } = this.state;
-    if (selectedRecordings.length > 0) {
-      this.setState({ recordingsMenu: null });
-      eel.remove_recordings(
-        selectedProject,
-        selectedRecordings
-      )(() => {
-        this.loadProjects();
-        this.setState({ selectedRecordings: [] });
-      });
-    }
-  };
-
-  addMetadata = () => {
-    eel.add_metadata(this.state.selectedProject)((res) => {
-      if (res) {
-        this.openAlert(
-          "Added meta data",
-          "Importing meta data was successful."
-        );
-        this.loadProjects();
-      } else {
-        this.openAlert(
-          "Could not add meta data",
-          "Importing meta data was unsuccessful, make sure it is in the AudioMoth-Format."
-        );
-      }
-    });
-  };
-
   setRecording = (specData, waveData) => {
     this.setState({
       specLoading: false,
@@ -292,10 +473,20 @@ export class App extends Component {
     });
   };
 
-  selectRecording = async (recordingIndex) => {
-    let recording = this.state.recordings[recordingIndex];
+  selectRecording = (recordingIndex) => {
+    const recording = this.state.recordings[recordingIndex];
+    if (!recording) {
+      return;
+    }
+
+    this.stopPlayback();
+
     this.setState({
       specLoading: true,
+      specData: [],
+      waveData: [],
+      specStart: 0,
+      specEnd: 0,
       recordingData: recording,
       selectedRecording: recordingIndex,
       classification: recording.classification,
@@ -306,43 +497,94 @@ export class App extends Component {
       tabValue: 0,
     });
 
-    eel.get_recording(
-      this.state.selectedProject,
-      recordingIndex
-    )((result) => {
-      if (result == false) {
+    backend.get_recording(this.state.selectedProject, recordingIndex)((result) => {
+      if (result === false) {
         this.setState({ fileNotFoundDialog: true });
-      } else {
-        this.setState({
-          recordingData: result,
-          fileNotFoundDialog: false,
-        });
+        return;
       }
+
+      this.setState((current) => {
+        const recordings = current.recordings.slice();
+        if (recordings[recordingIndex]) {
+          recordings[recordingIndex] = {
+            ...recordings[recordingIndex],
+            classification: result.classification || recordings[recordingIndex].classification,
+            species: result.species || recordings[recordingIndex].species,
+          };
+        }
+
+        return {
+          recordings,
+          recordingData: result,
+          classification: result.classification || current.classification,
+          fileNotFoundDialog: false,
+        };
+      });
     });
   };
 
   classifyAll = () => {
-    const { selectedProject, selectedRecordings } = this.state;
-    this.setState({ classifyAllLoading: true, recordingsMenu: null });
-    eel.classify_all(selectedProject)();
+    const windowRange = this.getClassificationWindowRange();
+    if (windowRange === false) {
+      return;
+    }
+
+    this.setState({
+      classifyAllLoading: true,
+      classifyAllProgress: 0,
+      recordingsMenu: null,
+    });
+    backend.classify_all(
+      this.state.selectedProject,
+      null,
+      windowRange?.start ?? null,
+      windowRange?.end ?? null
+    )();
   };
 
   classifyRecordings = () => {
     const { selectedProject, selectedRecordings } = this.state;
-    if (selectedRecordings.length > 0) {
-      this.setState({
-        classifyAllLoading: true,
-        recordingsMenu: null,
-        tabValue: 1,
-      });
-      eel.classify_all(selectedProject, selectedRecordings)();
+    if (selectedRecordings.length === 0) {
+      return;
     }
+
+    const windowRange = this.getClassificationWindowRange();
+    if (windowRange === false) {
+      return;
+    }
+
+    this.setState({
+      classifyAllLoading: true,
+      classifyAllProgress: 0,
+      recordingsMenu: null,
+      tabValue: 1,
+    });
+    backend.classify_all(
+      selectedProject,
+      selectedRecordings,
+      windowRange?.start ?? null,
+      windowRange?.end ?? null
+    )();
   };
 
   classify = () => {
+    const { selectedProject, selectedRecording } = this.state;
+    if (selectedRecording == null) {
+      return;
+    }
+
+    const windowRange = this.getClassificationWindowRange();
+    if (windowRange === false) {
+      return;
+    }
+
     this.setState({ classifyLoading: true });
-    const { selectedProject, selectedRecording, recordingData } = this.state;
-    eel.classify(selectedProject, selectedRecording)();
+    backend.classify(
+      selectedProject,
+      selectedRecording,
+      windowRange?.start ?? null,
+      windowRange?.end ?? null
+    )();
   };
 
   classifiedRecording = (
@@ -352,70 +594,103 @@ export class App extends Component {
     classes,
     progress
   ) => {
-    if (projectIndex == this.state.selectedProject) {
-      const newRecordings = this.state.recordings.slice();
-      newRecordings[recordingIndex].species = classes.join(", ");
-      newRecordings[recordingIndex].classification = classification;
+    if (projectIndex !== this.state.selectedProject) {
+      return;
+    }
 
-      if (this.state.selectedRecording == recordingIndex) {
-        let newRecordingData = this.state.recordingData;
-        newRecordingData.species = classes.join(", ");
-        this.setState({
-          recordingData: newRecordingData,
-          classification,
-          classifyLoading: false,
-        });
-      }
+    const normalizedProgress = Number.isFinite(progress)
+      ? Math.max(0, Math.min(progress, 100))
+      : 0;
 
+    const newRecordings = this.state.recordings.slice();
+    const nextClassification =
+      classification && Array.isArray(classification.prediction)
+        ? classification
+        : null;
+    if (newRecordings[recordingIndex]) {
+      newRecordings[recordingIndex] = {
+        ...newRecordings[recordingIndex],
+        species: classes.join(", "),
+        classification: nextClassification,
+      };
+    }
+
+    if (this.state.selectedRecording === recordingIndex) {
       this.setState({
-        recordings: newRecordings,
-        classifyAllProgress: progress,
-        classifyAllLoading: progress != 100,
-        recordingLoading: null,
+        recordingData: {
+          ...this.state.recordingData,
+          species: classes.join(", "),
+        },
+        classification: nextClassification,
+        classifyLoading: false,
       });
     }
+
+    this.setState({
+      recordings: newRecordings,
+      classifyAllProgress: normalizedProgress,
+      classifyAllLoading: normalizedProgress < 100,
+      recordingLoading: null,
+    });
   };
 
   setRecordingLoading = (projectIndex, recordingIndex) => {
-    if (projectIndex == this.state.selectedProject) {
-      this.setState({
-        recordingLoading: recordingIndex,
-      });
+    if (projectIndex === this.state.selectedProject) {
+      this.setState({ recordingLoading: recordingIndex });
     }
   };
 
   memoryError = () => {
     this.openAlert(
       "Memory error",
-      "The sound file was too big to be processed by your device. Make sure you have enough RAM or lower the maximum processing length."
+      "The sound file was too big to be processed by your device. Make sure you have enough RAM or switch the prediction range to Window."
     );
   };
 
+  classificationError = (message) => {
+    this.setState({
+      classifyLoading: false,
+      classifyAllLoading: false,
+      classifyAllProgress: 0,
+      recordingLoading: null,
+    });
+    this.openAlert("Classification error", message);
+  };
+
   exportCSV = () => {
+    const { projectContextSelection, projects } = this.state;
     this.setState({ projectContext: null });
-    const { projects, projectContextSelection } = this.state;
     const projectTitle = projects[projectContextSelection].title;
-    eel.export_csv(projectContextSelection)((res) => {
-      if (res) {
+
+    backend.export_csv(projectContextSelection, `${projectTitle}.csv`)((result) => {
+      if (result) {
         this.openAlert(
           "Successfully exported",
-          projectTitle + " was successfully exported."
+          `${projectTitle} was successfully exported.`
         );
       } else {
         this.openAlert(
           "Exporting unsuccessful",
-          projectTitle + " could not be exported."
+          `${projectTitle} could not be exported.`
         );
       }
     });
   };
 
-  openAlert = (title, text) => {
-    this.setState({ alertDialog: { title, text } });
+  playEnd = () => {
+    this.setState({ playPause: false, playbackCursor: null });
   };
 
-  playEnd = () => {
-    this.setState({ playPause: false });
+  stopPlayback = () => {
+    if (!this.state.playPause) {
+      if (this.state.playbackCursor !== null) {
+        this.setState({ playbackCursor: null });
+      }
+      return;
+    }
+
+    backend.pause();
+    this.setState({ playPause: false, playbackCursor: null });
   };
 
   playPause = () => {
@@ -423,712 +698,449 @@ export class App extends Component {
       playPause,
       selectedProject,
       selectedRecording,
-      specStart,
-      specEnd,
+      recordingData,
+      expansionRate,
     } = this.state;
-    if (playPause) {
-      this.setState({ playPause: false });
-      eel.pause();
-    } else {
-      this.setState({ playPause: true });
-      eel.play(selectedProject, selectedRecording, specStart, specEnd);
+
+    if (selectedRecording == null) {
+      return;
     }
+
+    if (playPause) {
+      this.stopPlayback();
+      return;
+    }
+
+    const { start, end } = this.getEffectivePlaybackRange();
+    if (end <= start) {
+      return;
+    }
+
+    const samplerate = recordingData.samplerate || 220500;
+    const durationMs =
+      (((end - start) * 128) / samplerate) * expansionRate * 1000;
+
+    this.setState({
+      playPause: true,
+      playbackCursor: {
+        startFrameIndex: start,
+        endFrameIndex: end,
+        startedAtMs: performance.now(),
+        durationMs,
+      },
+    });
+    backend.play(
+      selectedProject,
+      selectedRecording,
+      start,
+      end,
+      expansionRate
+    );
   };
 
-  renderRecording = ({ index, style, data }) => {
-    const {
-      recordings,
-      selectedRecording,
-      selectedRecordings,
-      recordingLoading,
-    } = this.state;
-    const recording = data[index];
+  toggleRecordingSelection = (index) => {
+    this.setState((current) => ({
+      selectedRecordings: current.selectedRecordings.includes(index)
+        ? current.selectedRecordings.filter((item) => item !== index)
+        : [...current.selectedRecordings, index],
+    }));
+  };
 
-    return (
-      <ListItemButton
-        alignItems="flex-start"
-        selected={index == selectedRecording}
-        style={{ ...style, padding: 0 }}
-        key={index.toString()}
-      >
-        <Checkbox
-          checked={selectedRecordings.includes(index)}
-          onChange={(event) => {
-            if (selectedRecordings.includes(index)) {
-              this.setState({
-                selectedRecordings: selectedRecordings.filter(
-                  (idx) => idx != index
-                ),
-              });
-            } else {
-              this.setState({
-                selectedRecordings: [...selectedRecordings, index],
-              });
-            }
-          }}
-        />
-        <ListItemText
-          primary={recording.title}
-          onClick={() => this.selectRecording(index)}
-          secondary={
-            <Typography
-              noWrap
-              style={{
-                fontSize: 10,
-                color: "#42a5f5",
-                overflow: "hidden",
-              }}
-            >
-              <Typography
-                variant="subtitle2"
-                style={{ fontSize: 10, color: "rgba(255, 255, 255, 0.7)" }}
-                display="inline"
-              >
-                {moment(recording.date).format("DD/MM/YYYY HH:mm:ss")}
-              </Typography>
-              {index == recordingLoading ? (
-                <CircularProgress
-                  size={8}
-                  style={{ marginLeft: 4 }}
-                  color="primary"
-                />
-              ) : (
-                recording.species && (
-                  <Typography
-                    style={{
-                      fontSize: 10,
-                      color: "#42a5f5",
-                      marginLeft: 4,
-                    }}
-                    display="inline"
-                  >
-                    {recording.species}
-                  </Typography>
-                )
-              )}
-            </Typography>
-          }
-          primaryTypographyProps={{ fontSize: 12, noWrap: true }}
-        />
-      </ListItemButton>
-    );
+  toggleAllRecordings = () => {
+    this.setState((current) => ({
+      selectedRecordings:
+        current.selectedRecordings.length === current.recordings.length ||
+        current.recordings.length === 0
+          ? []
+          : Array.from(Array(current.recordings.length).keys()),
+    }));
+  };
+
+  loadChunkRange = (start, end) => {
+    const { selectedProject, selectedRecording } = this.state;
+    this.setState({
+      specLoading: true,
+      specStart: start,
+      specEnd: end,
+    });
+
+    backend.get_chunk(selectedProject, selectedRecording, start, end)((data) => {
+      if (data) {
+        this.setState({
+          specData: data,
+          specLoading: false,
+        });
+      }
+    });
+  };
+
+  loadMoreChunks = (offset) => {
+    const { selectedProject, selectedRecording, specData } = this.state;
+    backend.get_chunk(selectedProject, selectedRecording, offset)((data) => {
+      if (data) {
+        this.setState({ specData: [...specData, ...data] });
+      }
+    });
+  };
+
+  handleClassifierChange = (event) => {
+    const value = event.target.value;
+    this.setState((current) => {
+      const projects = current.projects.slice();
+      if (projects[current.selectedProject]) {
+        projects[current.selectedProject] = {
+          ...projects[current.selectedProject],
+          classifier: value,
+        };
+      }
+
+      return {
+        classifier: value,
+        projects,
+      };
+    });
+    backend.set_classifier(this.state.selectedProject, value);
+  };
+
+  handleProcessingModeChange = (event) => {
+    const value = event.target.value;
+    this.setState((current) => {
+      const projects = current.projects.slice();
+      if (projects[current.selectedProject]) {
+        projects[current.selectedProject] = {
+          ...projects[current.selectedProject],
+          processing_mode: value,
+        };
+      }
+
+      return {
+        processingMode: value,
+        projects,
+      };
+    });
+    backend.set_processing_mode(this.state.selectedProject, value);
+  };
+
+  getClassificationWindowRange = () => {
+    const { processingMode, selectedRecording } = this.state;
+    if (processingMode !== "window") {
+      return null;
+    }
+
+    if (selectedRecording == null) {
+      this.openAlert(
+        "No spectrogram window",
+        "Select a recording first so Window mode can use the visible spectrogram range."
+      );
+      return false;
+    }
+
+    const { start, end } = this.getEffectivePlaybackRange();
+    if (end <= start) {
+      this.openAlert(
+        "No spectrogram window",
+        "Window mode needs a visible spectrogram range to classify."
+      );
+      return false;
+    }
+
+    return { start, end };
+  };
+
+  openSpeciesDialog = (recordingIndex = this.state.selectedRecording, focusSpecies = null) => {
+    if (recordingIndex == null) {
+      return;
+    }
+
+    const recording = this.state.recordings[recordingIndex];
+    const speciesText =
+      recordingIndex === this.state.selectedRecording
+        ? this.state.recordingData.species || recording?.species || ""
+        : recording?.species || "";
+
+    const species = splitSpeciesText(speciesText);
+    const initialSpecies =
+      focusSpecies && !species.includes(focusSpecies)
+        ? [focusSpecies, ...species]
+        : species;
+
+    this.setState({
+      speciesDialog: {
+        recordingIndex,
+        focusSpecies: focusSpecies || initialSpecies[0] || null,
+        species: initialSpecies,
+      },
+    });
+  };
+
+  handleSpeciesSave = (species) => {
+    const { selectedProject, speciesDialog } = this.state;
+    if (!speciesDialog) {
+      return;
+    }
+
+    const recordingIndex = speciesDialog.recordingIndex;
+    const speciesText = species.join(", ");
+
+    backend.set_species(selectedProject, recordingIndex, speciesText)(() => {
+      this.setState((current) => {
+        const recordings = current.recordings.slice();
+        if (recordings[recordingIndex]) {
+          recordings[recordingIndex] = {
+            ...recordings[recordingIndex],
+            species: speciesText,
+          };
+        }
+
+        return {
+          speciesDialog: null,
+          recordings,
+          recordingData:
+            current.selectedRecording === recordingIndex
+              ? {
+                  ...current.recordingData,
+                  species: speciesText,
+                }
+              : current.recordingData,
+        };
+      });
+    });
   };
 
   render() {
     const {
-      projects,
-      recordings,
-      selectedProject,
+      alertDialog,
+      classification,
+      classifier,
+      classifiers,
+      classifyAllLoading,
+      classifyAllProgress,
+      classifyLoading,
       createProjectModal,
-      projectTitle,
-      projectDescription,
+      editProject,
+      fileNotFoundDialog,
+      processingMode,
+      playPause,
+      confirmDeleteDialog,
       projectContext,
+      projectDescription,
+      projectFilter,
+      projectTitle,
+      projects,
+      recordingData,
+      recordingLoading,
+      recordingLocation,
+      recordingFilter,
+      recordings,
+      recordingsMenu,
+      selectedProject,
       selectedRecording,
       selectedRecordings,
       specData,
-      classification,
-      tabValue,
-      specTabValue,
-      recordingData,
-      classifier,
       specLoading,
-      classifyLoading,
-      recordingLocation,
-      editProject,
-      classifyAllProgress,
-      classifyAllLoading,
-      recordingsMenu,
-      fileNotFoundDialog,
-      alertDialog,
-      maximumProcessingLength,
-      classifiers,
-      speciesDialog,
-      species,
-      waveData,
       specStart,
-      specEnd,
-      playPause,
+      specTabValue,
+      speciesDialog,
+      tabValue,
+      waveData,
+      playbackCursor,
+      expansionRate,
     } = this.state;
+    const resolvedClassification = resolveClassificationMetadata(
+      classification,
+      classifiers
+    );
+
+    const normalizedProjectFilter = projectFilter.trim().toLowerCase();
+    const filteredProjects = projects
+      .map((project, index) => ({ project, index }))
+      .filter(({ project }) => {
+        if (!normalizedProjectFilter) {
+          return true;
+        }
+
+        return [project.title, project.description]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(normalizedProjectFilter);
+      });
+
+    const normalizedRecordingFilter = recordingFilter.trim().toLowerCase();
+    const filteredRecordings = recordings
+      .map((recording, index) => ({ recording, index }))
+      .filter(({ recording }) => {
+        if (!normalizedRecordingFilter) {
+          return true;
+        }
+
+        return [
+          recording.title,
+          recording.species,
+          recording.path,
+          recording.temperature != null ? String(recording.temperature) : "",
+          recording.date ? new Date(recording.date).toLocaleString("en-GB") : "",
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(normalizedRecordingFilter);
+      });
+    const selectedClassifier = findClassifierByKey(classifiers, classifier);
+    const speciesDialogRecording =
+      speciesDialog && recordings[speciesDialog.recordingIndex]
+        ? recordings[speciesDialog.recordingIndex]
+        : null;
+    const speciesDialogClassification = speciesDialogRecording
+      ? resolveClassificationMetadata(
+          speciesDialogRecording.classification,
+          classifiers
+        )
+      : resolvedClassification;
+    const speciesDialogOptions = speciesDialog
+      ? buildSpeciesOptions(
+          speciesDialogClassification,
+          selectedClassifier,
+          speciesDialog.species
+        )
+      : [];
 
     return (
       <ThemeProvider theme={darkTheme}>
         <CssBaseline />
-        <Grid container height="100%">
-          <Grid
-            item
-            xs={1.75}
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              maxHeight: window.innerHeight,
-            }}
-          >
-            <List style={{ flex: 1 }}>
-              {projects.map((project, index) => (
-                <>
-                  <ListItemButton
-                    alignItems="flex-start"
-                    key={index.toString()}
-                    selected={index == selectedProject}
-                    onClick={() => {
-                      this.selectProject(index);
-                    }}
-                    onContextMenu={(event) => {
-                      this.handleProjectContext(event, index);
-                    }}
-                  >
-                    <ListItemAvatar>
-                      <Badge
-                        badgeContent={project.recordings.length}
-                        color="primary"
-                      >
-                        <Avatar>
-                          <FolderIcon />
-                        </Avatar>
-                      </Badge>
-                    </ListItemAvatar>
-                    <ListItemText
-                      primary={project.title}
-                      secondary={project.description}
-                      primaryTypographyProps={{ noWrap: true }}
-                      secondaryTypographyProps={{ noWrap: true }}
-                    />
-                  </ListItemButton>
-                  <Divider variant="inset" component="li" />
-                </>
-              ))}
-            </List>
-            <Box textAlign="center" style={{ marginBottom: 16 }}>
-              <Button
-                onClick={() =>
+        <Box className="appRoot">
+          <Box className="appLayout">
+            <Box className="sidebarPane projectPane">
+              <ProjectSidebar
+                projects={filteredProjects}
+                selectedProject={selectedProject}
+                onSelectProject={this.selectProject}
+                projectFilter={projectFilter}
+                onProjectFilterChange={(event) =>
+                  this.setState({ projectFilter: event.target.value })
+                }
+                onOpenCreateProject={() =>
                   this.setState({
                     createProjectModal: true,
                     editProject: false,
+                    projectTitle: "",
+                    projectDescription: "",
                   })
                 }
-                variant="contained"
-              >
-                Create Project
-              </Button>
-            </Box>
-          </Grid>
-          <Divider orientation="vertical" flexItem sx={{ mr: "-1px" }} />
-          <Grid
-            item
-            xs={1.75}
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              maxHeight: window.innerHeight,
-            }}
-          >
-            <Box
-              style={{
-                display: "flex",
-                flexDirection: "row",
-                justifyContent: "space-between",
-              }}
-            >
-              <FormControlLabel
-                style={{ marginRight: 0, marginLeft: 0 }}
-                control={
-                  <Checkbox
-                    checked={
-                      selectedRecordings.length > 0 &&
-                      selectedRecordings.length == recordings.length
-                    }
-                    onChange={(event) => {
-                      if (
-                        selectedRecordings.length == recordings.length ||
-                        recordings.length == 0
-                      ) {
-                        this.setState({
-                          selectedRecordings: [],
-                        });
-                      } else {
-                        this.setState({
-                          selectedRecordings: Array.from(
-                            Array(recordings.length).keys()
-                          ),
-                        });
-                      }
-                    }}
-                  />
-                }
-                label="Select all"
+                onProjectContextMenu={this.handleProjectContext}
               />
-              <IconButton
-                onClick={(event) =>
-                  this.setState({ recordingsMenu: event.currentTarget })
+            </Box>
+
+            <Divider orientation="vertical" flexItem className="desktopDivider" />
+
+            <Box className="sidebarPane recordingsPane">
+              <RecordingSidebar
+                recordings={filteredRecordings}
+                selectedRecording={selectedRecording}
+                selectedRecordings={selectedRecordings}
+                recordingLoading={recordingLoading}
+                recordingFilter={recordingFilter}
+                onRecordingFilterChange={(event) =>
+                  this.setState({ recordingFilter: event.target.value })
                 }
-              >
-                <MoreVertIcon />
-              </IconButton>
+                onToggleAll={this.toggleAllRecordings}
+                onOpenMenu={this.openRecordingsMenu}
+                onOpenContextMenu={this.openRecordingsMenu}
+                onAddRecordings={this.addRecordings}
+                onSelectRecording={this.selectRecording}
+                onToggleRecording={this.toggleRecordingSelection}
+                onEditSpecies={this.openSpeciesDialog}
+              />
             </Box>
 
-            <FixedSizeList
-              height={window.innerHeight - 150}
-              width={"100%"}
-              itemSize={48}
-              itemCount={recordings.length}
-              overscanCount={5}
-              itemData={recordings}
-              itemKey={(index, data) => {
-                return index.toString();
-              }}
-            >
-              {this.renderRecording}
-            </FixedSizeList>
-            <Box textAlign="center" style={{ marginBottom: 16 }}>
-              <Button
-                onClick={this.addRecordings}
-                variant="outlined"
-                style={{ marginBottom: 16 }}
-              >
-                Add Recordings
-              </Button>
-              <Button onClick={this.addMetadata} variant="outlined">
-                Add Metadata
-              </Button>
+            <Divider orientation="vertical" flexItem className="desktopDivider" />
+
+            <Box className="contentPane mainPane">
+              <MainContent
+                specTabValue={specTabValue}
+                onSpecTabChange={(event, value) =>
+                  this.setState({ specTabValue: value })
+                }
+                specLoading={specLoading}
+                selectedRecording={selectedRecording}
+                specData={specData}
+                waveData={waveData}
+                recordingData={recordingData}
+                specStart={specStart}
+                playbackCursor={playbackCursor}
+                onLoadData={this.loadChunkRange}
+                onLoadMore={this.loadMoreChunks}
+                playPause={playPause}
+                onPlayPause={this.playPause}
+                expansionRate={expansionRate}
+                onExpansionRateChange={(event) => {
+                  this.stopPlayback();
+                  this.setState({ expansionRate: event.target.value });
+                }}
+                tabValue={tabValue}
+                onTabChange={(event, value) => this.setState({ tabValue: value })}
+                classifyLoading={classifyLoading}
+                onClassify={this.classify}
+                onEditSpecies={(focusSpecies) =>
+                  this.openSpeciesDialog(selectedRecording, focusSpecies)
+                }
+                recordingLocation={recordingLocation}
+                classification={resolvedClassification}
+                classifiers={classifiers}
+                classifier={classifier}
+                processingMode={processingMode}
+                onClassifierChange={this.handleClassifierChange}
+                onProcessingModeChange={this.handleProcessingModeChange}
+                classifyAllLoading={classifyAllLoading}
+                classifyAllProgress={classifyAllProgress}
+                onClassifyAll={this.classifyAll}
+              />
             </Box>
-          </Grid>
-          <Divider
-            orientation="vertical"
-            flexItem
-            sx={{ mr: "-1px", mt: "-1px" }}
-          />
-          <Grid item xs={8.5}>
-            <Tabs
-              value={specTabValue}
-              onChange={(event, newValue) =>
-                this.setState({ specTabValue: newValue })
+          </Box>
+        </Box>
+
+        <AppDialogs
+          createProjectModal={createProjectModal}
+          onCloseCreateProject={() =>
+            this.setState({
+              createProjectModal: false,
+              projectTitle: "",
+              projectDescription: "",
+            })
+          }
+          projectTitle={projectTitle}
+          projectDescription={projectDescription}
+          onProjectTitleChange={(event) =>
+            this.setState({ projectTitle: event.target.value })
+          }
+          onProjectDescriptionChange={(event) =>
+            this.setState({ projectDescription: event.target.value })
+          }
+          onSaveProject={editProject ? this.saveProject : this.createProject}
+          editProject={editProject}
+          fileNotFoundDialog={fileNotFoundDialog}
+          recordingPath={recordingData.path}
+          onRetryRecording={() => this.selectRecording(selectedRecording)}
+          onCloseFileNotFound={() => this.setState({ fileNotFoundDialog: false })}
+          alertDialog={alertDialog}
+          onCloseAlert={() => this.setState({ alertDialog: null })}
+          confirmDeleteDialog={confirmDeleteDialog}
+          onCloseConfirmDelete={() =>
+            this.setState({ confirmDeleteDialog: null })
+          }
+          onConfirmDelete={() => {
+            const dialog = this.state.confirmDeleteDialog;
+            this.setState({ confirmDeleteDialog: null }, () => {
+              if (dialog && dialog.onConfirm) {
+                dialog.onConfirm();
               }
-            >
-              <Tab label={"Spectrogram"} />
-            </Tabs>
-            <Box
-              style={{
-                height: "50%",
-                overflow: "hidden",
-                position: "relative",
-              }}
-            >
-              <Fade
-                in={specLoading}
-                style={{
-                  position: "absolute",
-                  zIndex: 100,
-                }}
-              >
-                <div
-                  style={{
-                    width: "100%",
-                    height: "100%",
-                  }}
-                >
-                  <BackdropFilter
-                    filter={"blur(10px)"}
-                    canvasFallback={true}
-                    className="bluredForm"
-                  >
-                    <CircularProgress
-                      style={{
-                        position: "absolute",
-                        top: "50%",
-                        left: "50%",
-                        transform: "translate(-50%, -50%)",
-                      }}
-                    />
-                  </BackdropFilter>
-                </div>
-              </Fade>
-
-              {specData != [] && (
-                <Spectrogram
-                  id={"spectrogram"}
-                  init={specLoading}
-                  data={specData}
-                  waveData={waveData}
-                  maxF={
-                    recordingData.samplerate
-                      ? (257 / recordingData.samplerate) * 2000
-                      : (257 / 220500) * 2000
-                  }
-                  maxS={
-                    recordingData.samplerate
-                      ? recordingData.samplerate / 128 + 1
-                      : 220500 / 128 + 1
-                  }
-                  offset={specStart}
-                  duration={recordingData.duration}
-                  samplerate={recordingData.samplerate}
-                  loadData={(start, end) => {
-                    console.log("get chunk");
-                    this.setState({
-                      specLoading: true,
-                      specStart: start,
-                      specEnd: end,
-                    });
-                    eel.get_chunk(
-                      selectedProject,
-                      selectedRecording,
-                      start,
-                      end
-                    )((data) => {
-                      if (data) {
-                        this.setState({
-                          specData: data,
-                          specLoading: false,
-                        });
-                      }
-                    });
-                  }}
-                  loadMore={(offset) => {
-                    console.log("get chunk", offset);
-                    eel.get_chunk(
-                      selectedProject,
-                      selectedRecording,
-                      offset
-                    )((data) => {
-                      if (data) {
-                        this.setState({ specData: [...specData, ...data] });
-                      }
-                    });
-                  }}
-                />
-              )}
-
-              <Box
-                style={{
-                  position: "absolute",
-                  bottom: 16,
-                  right: 16,
-                }}
-              >
-                <Button variant="contained" onClick={this.playPause}>
-                  {playPause ? "Pause" : "Play"}
-                </Button>
-              </Box>
-            </Box>
-            <Divider flexItem sx={{ mr: "-1px" }} />
-            <Tabs
-              value={tabValue}
-              onChange={(event, newValue) =>
-                this.setState({ tabValue: newValue })
-              }
-            >
-              <Tab label="Recording" />
-              <Tab label="Project" />
-            </Tabs>
-            <Box
-              style={{
-                display: "block",
-                flexDirection: "row",
-                padding: 16,
-                overflow: "hidden",
-              }}
-            >
-              <Grid display={tabValue == 0 ? "flex" : "none"}>
-                <Grid item xs={3}>
-                  <Typography variant="h6" gutterBottom>
-                    Metadata
-                  </Typography>
-                  <Typography variant="subtitle2" color="text.secondary" noWrap>
-                    Title: {recordingData.title}
-                  </Typography>
-                  <Typography variant="subtitle2" color="text.secondary" noWrap>
-                    Date:{" "}
-                    {moment(recordingData.date).format("DD/MM/YYYY HH:mm:ss")}
-                  </Typography>
-                  <Typography variant="subtitle2" color="text.secondary" noWrap>
-                    Temperature: {recordingData.temperature || "-"} °C
-                  </Typography>
-                  <Typography variant="subtitle2" color="text.secondary" noWrap>
-                    Duration:{" "}
-                    {recordingData.duration
-                      ? recordingData.duration.toFixed(2)
-                      : "-"}{" "}
-                    s
-                  </Typography>
-                  <Typography variant="subtitle2" color="text.secondary" noWrap>
-                    Sample rate: {recordingData.samplerate || "-"} Hz
-                  </Typography>
-                  <Link
-                    variant="subtitle2"
-                    color="text.primary"
-                    component={Typography}
-                    underline="hover"
-                    style={{ cursor: "pointer" }}
-                    noWrap
-                    onClick={() =>
-                      this.setState({
-                        speciesDialog: true,
-                        species: recordingData.species
-                          ? recordingData.species.split(", ")
-                          : [],
-                      })
-                    }
-                  >
-                    Species: {recordingData.species || "-"}
-                  </Link>
-                  <LoadingButton
-                    onClick={this.classify}
-                    variant="contained"
-                    loading={classifyLoading}
-                    style={{ marginTop: 16 }}
-                  >
-                    Classify
-                  </LoadingButton>
-                </Grid>
-
-                <Grid item xs={3}>
-                  <Typography variant="h6">Location</Typography>
-                  <MapContainer
-                    style={{
-                      position: "relative",
-                      width: 220,
-                      height: 180,
-                      borderRadius: 10,
-                      marginTop: 4,
-                      marginBottom: 12,
-                    }}
-                    center={recordingLocation}
-                  />
-                </Grid>
-
-                <Grid item xs={6}>
-                  {classification && (
-                    <BarChart
-                      id={"predictionChart"}
-                      values={classification.prediction || []}
-                      categories={classifiers[classifier].classes || []}
-                    />
-                  )}
-                </Grid>
-              </Grid>
-              <Box display={tabValue == 1 ? "flex" : "none"}>
-                <Select
-                  value={classifier}
-                  label="Classifier"
-                  onChange={(event) => {
-                    const val = event.target.value;
-                    this.setState({ classifier: val });
-                    eel.set_classifier(selectedProject, val)(this.loadProjects);
-                  }}
-                >
-                  {classifiers.map((c, i) => (
-                    <MenuItem value={i}>{c.name}</MenuItem>
-                  ))}
-                </Select>
-                <Select
-                  value={maximumProcessingLength}
-                  label="Maximum processing length"
-                  style={{ marginLeft: 12 }}
-                  onChange={(event) => {
-                    const val = event.target.value;
-                    eel.set_maxproclen(
-                      this.state.selectedProject,
-                      val
-                    )(this.loadProjects);
-                    this.setState({ maximumProcessingLength: val });
-                  }}
-                >
-                  <MenuItem value={5}>5 seconds</MenuItem>
-                  <MenuItem value={10}>10 seconds</MenuItem>
-                  <MenuItem value={15}>15 seconds</MenuItem>
-                  <MenuItem value={20}>20 seconds</MenuItem>
-                  <MenuItem value={0}>Full</MenuItem>
-                </Select>
-                <Button
-                  onClick={this.classifyAll}
-                  variant="contained"
-                  style={{ marginLeft: 12 }}
-                  disabled={classifyAllLoading}
-                >
-                  {classifyAllLoading ? (
-                    <CircularProgress
-                      color="inherit"
-                      variant={
-                        classifyAllLoading && classifyAllProgress == 0
-                          ? "indeterminate"
-                          : "determinate"
-                      }
-                      size={16}
-                      value={classifyAllProgress}
-                    />
-                  ) : (
-                    "Classify all"
-                  )}
-                </Button>
-              </Box>
-            </Box>
-          </Grid>
-        </Grid>
-
-        <Dialog
-          open={createProjectModal}
-          onClose={() => this.setState({ createProjectModal: false })}
-        >
-          <DialogTitle>Create Project</DialogTitle>
-          <DialogContent>
-            <DialogContentText>
-              Create a new project and add your recordings to analyze and
-              classify them.
-            </DialogContentText>
-            <TextField
-              autoFocus
-              label="Title"
-              fullWidth
-              variant="outlined"
-              margin="normal"
-              value={projectTitle}
-              onChange={(event) =>
-                this.setState({ projectTitle: event.target.value })
-              }
-              required
-            />
-            <TextField
-              autoFocus
-              label="Description"
-              fullWidth
-              variant="outlined"
-              margin="normal"
-              value={projectDescription}
-              onChange={(event) =>
-                this.setState({ projectDescription: event.target.value })
-              }
-              multiline
-            />
-          </DialogContent>
-          <DialogActions>
-            <Button
-              onClick={() =>
-                this.setState({
-                  createProjectModal: false,
-                  projectTitle: "",
-                  projectDescription: "",
-                })
-              }
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={editProject ? this.saveProject : this.createProject}
-              variant="contained"
-            >
-              {editProject ? "Save" : "Create"}
-            </Button>
-          </DialogActions>
-        </Dialog>
-
-        <Dialog
-          open={fileNotFoundDialog}
-          onClose={() => this.setState({ fileNotFoundDialog: false })}
-        >
-          <DialogTitle>File was not found</DialogTitle>
-          <DialogContent>
-            <DialogContentText>
-              The file {recordingData.path} was not found. If it is on another
-              storage, please connect it to your device.
-            </DialogContentText>
-          </DialogContent>
-          <DialogActions>
-            <Button
-              onClick={() => this.selectRecording(this.state.selectedRecording)}
-              autoFocus
-              color="primary"
-            >
-              Retry
-            </Button>
-            <Button
-              onClick={() => this.setState({ fileNotFoundDialog: false })}
-              color="inherit"
-            >
-              Ok
-            </Button>
-          </DialogActions>
-        </Dialog>
-
-        <Dialog
-          open={alertDialog != null}
-          onClose={() => this.setState({ alertDialog: null })}
-        >
-          <DialogTitle>{alertDialog ? alertDialog.title : ""}</DialogTitle>
-          <DialogContent>
-            <DialogContentText>
-              {alertDialog ? alertDialog.text : ""}
-            </DialogContentText>
-          </DialogContent>
-          <DialogActions>
-            <Button
-              onClick={() => this.setState({ alertDialog: null })}
-              color="inherit"
-            >
-              Ok
-            </Button>
-          </DialogActions>
-        </Dialog>
-
-        <Dialog
-          open={speciesDialog}
-          onClose={() => this.setState({ speciesDialog: false })}
-        >
-          <DialogTitle>Species</DialogTitle>
-          <DialogContent>
-            <FormControl sx={{ m: 1, width: 300 }}>
-              <InputLabel>Species</InputLabel>
-              <Select
-                multiple
-                value={species}
-                onChange={(event) => {
-                  let value = event.target.value;
-                  this.setState({
-                    species:
-                      typeof value === "string" ? value.split(",") : value,
-                  });
-                }}
-                input={<OutlinedInput label="Species" />}
-                renderValue={(selected) => selected.join(", ")}
-                MenuProps={{
-                  PaperProps: {
-                    style: {
-                      maxHeight: 224,
-                      width: 250,
-                    },
-                  },
-                }}
-              >
-                {classifiers[classifier] &&
-                  classifiers[classifier].classes_short.map((name, index) => (
-                    <MenuItem key={name} value={name}>
-                      <Checkbox checked={species.indexOf(name) > -1} />
-                      <ListItemText
-                        primary={classifiers[classifier].classes[index]}
-                      />
-                    </MenuItem>
-                  ))}
-              </Select>
-            </FormControl>
-          </DialogContent>
-          <DialogActions>
-            <Button
-              onClick={() => {
-                let speciesText = species.join(", ");
-                eel.set_species(
-                  selectedProject,
-                  selectedRecording,
-                  speciesText
-                )(() => {
-                  let recordingData = this.state.recordingData;
-                  recordingData.species = speciesText;
-                  this.setState({ speciesDialog: false, recordingData });
-                });
-              }}
-            >
-              Save
-            </Button>
-          </DialogActions>
-        </Dialog>
+            });
+          }}
+          speciesDialog={speciesDialog}
+          speciesDialogOptions={speciesDialogOptions}
+          onSaveSpecies={this.handleSpeciesSave}
+          onCloseSpecies={() => this.setState({ speciesDialog: null })}
+        />
 
         <Menu
           open={projectContext !== null}
@@ -1159,7 +1171,7 @@ export class App extends Component {
               <Typography>Export CSV</Typography>
             </ListItemText>
           </MenuItem>
-          <MenuItem onClick={this.removeProject}>
+          <MenuItem onClick={this.openDeleteProjectDialog}>
             <ListItemIcon>
               <DeleteOutlineIcon fontSize="small" color="error" />
             </ListItemIcon>
@@ -1172,7 +1184,20 @@ export class App extends Component {
         <Menu
           open={recordingsMenu !== null}
           onClose={() => this.setState({ recordingsMenu: null })}
-          anchorEl={recordingsMenu}
+          anchorReference={
+            recordingsMenu && recordingsMenu.mouseX != null
+              ? "anchorPosition"
+              : "anchorEl"
+          }
+          anchorPosition={
+            recordingsMenu && recordingsMenu.mouseX != null
+              ? {
+                  top: recordingsMenu.mouseY,
+                  left: recordingsMenu.mouseX,
+                }
+              : undefined
+          }
+          anchorEl={recordingsMenu ? recordingsMenu.anchorEl : null}
         >
           <MenuItem onClick={this.classifyRecordings}>
             <ListItemIcon>
@@ -1182,7 +1207,7 @@ export class App extends Component {
               <Typography>Classify</Typography>
             </ListItemText>
           </MenuItem>
-          <MenuItem onClick={this.removeRecordings}>
+          <MenuItem onClick={this.openDeleteRecordingsDialog}>
             <ListItemIcon>
               <DeleteOutlineIcon fontSize="small" color="error" />
             </ListItemIcon>

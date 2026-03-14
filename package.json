@@ -6,27 +6,30 @@
     "@arction/lcjs": "^3.4.0",
     "@emotion/react": "^11.10.5",
     "@emotion/styled": "^11.10.5",
-    "@fontsource/roboto": "^4.5.8",
     "@mui/icons-material": "^5.11.0",
     "@mui/lab": "^5.0.0-alpha.114",
     "@mui/material": "^5.11.1",
-    "@testing-library/jest-dom": "^5.16.5",
-    "@testing-library/react": "^13.4.0",
-    "@testing-library/user-event": "^13.5.0",
-    "google-maps-react": "^2.0.6",
-    "moment": "^2.29.4",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
     "react": "^18.2.0",
     "react-backdrop-filter": "^2.1.0",
     "react-dom": "^18.2.0",
     "react-scripts": "5.0.1",
-    "react-window": "^1.8.8",
-    "web-vitals": "^2.1.4"
+    "react-window": "^1.8.8"
   },
   "scripts": {
     "start": "react-scripts start",
+    "start:frontend": "react-scripts start",
+    "start:backend": "python main.py --reload --port 8420",
     "build": "react-scripts build",
+    "build:backend-binary": "python scripts/build_python_sidecar.py",
+    "build:tauri": "npm run build && npm run build:backend-binary",
+    "tauri:dev": "node scripts/run-tauri.mjs dev",
+    "tauri:build": "node scripts/run-tauri.mjs build --ci --config src-tauri/tauri.bundle.conf.json",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
   },
   "eslintConfig": {
     "extends": [

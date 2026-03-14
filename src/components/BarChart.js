@@ -4,7 +4,6 @@ import {
   SolidLine,
   ColorRGBA,
   emptyLine,
-  emptyFill,
   AxisTickStrategies,
   AutoCursorModes,
   UIOrigins,
@@ -15,11 +14,12 @@ import {
 } from "@arction/lcjs";
 import React, { useRef, useEffect } from "react";
 
+const LIGHTBLUE = "#66C0B7";
+
 let barChart;
-{
-  barChart = (lc, options) => {
+barChart = (lc, options) => {
     // flat blue fill style for negative bars
-    const flatBlueStyle = new SolidFill().setColor(ColorCSS("#42a5f5"));
+    const flatBlueStyle = new SolidFill().setColor(ColorCSS(LIGHTBLUE));
 
     let y = 0;
     const figureThickness = 10;
@@ -65,7 +65,12 @@ let barChart;
     // Change how marker displays its information.
     rectangles.setCursorResultTableFormatter((builder, series, figure) => {
       // Find cached entry for the figure.
-      const entry = bars.find((bar) => bar.rect == figure).entry;
+      const hoveredBar = bars.find((bar) => bar.rect === figure);
+      if (!hoveredBar) {
+        return builder;
+      }
+
+      const entry = hoveredBar.entry;
       // Parse result table content from values of 'entry'.
       return builder
         .addRow("Species: " + entry.category)
@@ -177,19 +182,16 @@ let barChart;
       addValue,
       addValues,
     };
-  };
-}
+};
 
 const BarChart = (props) => {
   const { values, categories, id } = props;
   const chartRef = useRef(undefined);
 
   useEffect(() => {
-    console.log("create chart");
-
     const themeTextFillStyle = new SolidFill({ color: ColorCSS("#fff") });
     const themeDataSeriesFillStyles = [
-      new SolidFill({ color: ColorCSS("#42a5f5") }),
+      new SolidFill({ color: ColorCSS(LIGHTBLUE) }),
       new SolidFill({ color: ColorCSS("#fff") }),
     ];
     const themeAxisFillStyle = new SolidFill({
@@ -321,13 +323,12 @@ const BarChart = (props) => {
     chartRef.current = { chart };
 
     return () => {
-      console.log("destroy chart");
       chart.chart.dispose();
       chartRef.current = undefined;
     };
   }, [id, values, categories]);
 
-  return <div id={id} style={{ height: "100%" }}></div>;
+  return <div id={id} style={{ width: "100%", height: "100%" }}></div>;
 };
 
 export default BarChart;
