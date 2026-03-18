@@ -95,6 +95,146 @@ const splitSpeciesText = (value) =>
 const findClassifierByKey = (classifiers, classifierKey) =>
   classifiers.find((item) => item.key === classifierKey) || null;
 
+const findClassifiersByKeys = (classifiers, classifierKeys) =>
+  normalizeClassifierKeys(classifierKeys)
+    .map((classifierKey) => findClassifierByKey(classifiers, classifierKey))
+    .filter(Boolean);
+
+const normalizeClassifierKeys = (value) => {
+  if (Array.isArray(value)) {
+    const normalized = [];
+    value.forEach((item) => {
+      if (typeof item !== "string") {
+        return;
+      }
+      const key = item.trim();
+      if (key && !normalized.includes(key)) {
+        normalized.push(key);
+      }
+    });
+    return normalized;
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    return [value.trim()];
+  }
+
+  return [];
+};
+
+const mergeClassificationEntries = (existing, incoming) => {
+  if (!existing) {
+    return incoming;
+  }
+
+  return {
+    ...existing,
+    ...incoming,
+    prediction: Array.isArray(incoming?.prediction)
+      ? incoming.prediction
+      : existing.prediction,
+    classes:
+      Array.isArray(incoming?.classes) && incoming.classes.length > 0
+        ? incoming.classes
+        : existing.classes,
+    classes_short:
+      Array.isArray(incoming?.classes_short) && incoming.classes_short.length > 0
+        ? incoming.classes_short
+        : existing.classes_short,
+  };
+};
+
+const getClassificationEntries = (classificationsValue, classificationValue = null) => {
+  const entriesByKey = new Map();
+  const ingest = (entry) => {
+    if (!entry || typeof entry !== "object") {
+      return;
+    }
+
+    const classifierKey =
+      typeof entry.classifier_key === "string" ? entry.classifier_key : "";
+    if (!classifierKey) {
+      return;
+    }
+
+    entriesByKey.set(
+      classifierKey,
+      mergeClassificationEntries(entriesByKey.get(classifierKey), entry)
+    );
+  };
+
+  if (Array.isArray(classificationsValue)) {
+    classificationsValue.forEach(ingest);
+  }
+  ingest(classificationValue);
+
+  return Array.from(entriesByKey.values());
+};
+
+const getClassificationForKey = (classificationsValue, classifierKey) =>
+  getClassificationEntries(classificationsValue).find(
+    (classification) => classification.classifier_key === classifierKey
+  ) || null;
+
+const resolvePredictionClassifierKey = (
+  preferredKey,
+  classifierKeys,
+  classificationsValue,
+  classificationValue = null
+) => {
+  const normalizedClassifierKeys = normalizeClassifierKeys(classifierKeys);
+  const classifications = getClassificationEntries(
+    classificationsValue,
+    classificationValue
+  );
+  const availablePredictionKeys = normalizedClassifierKeys.filter((classifierKey) =>
+    classifications.some(
+      (classification) => classification.classifier_key === classifierKey
+    )
+  );
+
+  if (preferredKey && normalizedClassifierKeys.includes(preferredKey)) {
+    return preferredKey;
+  }
+  if (availablePredictionKeys.length > 0) {
+    return availablePredictionKeys[0];
+  }
+  if (normalizedClassifierKeys.length > 0) {
+    return normalizedClassifierKeys[0];
+  }
+  return classifications[0]?.classifier_key || "";
+};
+
+const nextClassifierKeysFromSelection = (
+  currentKeys,
+  selectedOptions,
+  reason,
+  details
+) => {
+  const normalizedCurrentKeys = normalizeClassifierKeys(currentKeys);
+  if (reason === "clear") {
+    return [];
+  }
+
+  if (reason === "selectOption" && details?.option?.key) {
+    return normalizedCurrentKeys.includes(details.option.key)
+      ? normalizedCurrentKeys
+      : [...normalizedCurrentKeys, details.option.key];
+  }
+
+  if (reason === "removeOption" && details?.option?.key) {
+    return normalizedCurrentKeys.filter((key) => key !== details.option.key);
+  }
+
+  const normalizedSelectedKeys = normalizeClassifierKeys(
+    (selectedOptions || []).map((item) => item?.key)
+  );
+  return [
+    ...normalizedCurrentKeys.filter((key) => normalizedSelectedKeys.includes(key)),
+    ...normalizedSelectedKeys.filter((key) => !normalizedCurrentKeys.includes(key)),
+  ];
+};
+
 const resolveMetadataArray = (classificationValue, classifierValue) => {
   if (Array.isArray(classificationValue) && classificationValue.length > 0) {
     return classificationValue;
@@ -258,6 +398,7 @@ export class App extends Component {
       specData: [],
       waveData: [],
       classification: null,
+      classifications: [],
       tabValue: 1,
       specTabValue: 0,
       recordingData: EMPTY_RECORDING,
@@ -265,7 +406,8 @@ export class App extends Component {
         lat: 0,
         lng: 0,
       },
-      classifier: "",
+      classifierKeys: [],
+      predictionClassifier: "",
       specLoading: false,
       classifyLoading: false,
       editProject: false,
@@ -615,8 +757,17 @@ export class App extends Component {
       this.setState((current) => ({
         classifiers,
         classifiersLoaded: true,
-        classifier:
-          current.classifier || classifiers[0]?.key || "",
+        classifierKeys:
+          normalizeClassifierKeys(current.classifierKeys).filter((classifierKey) =>
+            classifiers.some((item) => item.key === classifierKey)
+          ) || [],
+        predictionClassifier:
+          resolvePredictionClassifierKey(
+            current.predictionClassifier,
+            current.classifierKeys,
+            current.classifications,
+            current.classification
+          ) || classifiers[0]?.key || "",
       }));
     }).catch((error) => {
       console.error("Failed to load classifiers", error);
@@ -651,6 +802,7 @@ export class App extends Component {
       recordingData: EMPTY_RECORDING,
       recordingLocation: { lat: 0, lng: 0 },
       classification: null,
+      classifications: [],
       specData: [],
       waveData: [],
       playPause: false,
@@ -706,20 +858,26 @@ export class App extends Component {
       this.setState(
         {
           recordings: [],
-          classifier: "",
+          classifierKeys: [],
           processingMode: "full",
+          predictionClassifier: "",
         },
         this.resetRecordingState
       );
       return;
     }
 
+    const classifierKeys = normalizeClassifierKeys(
+      project.classifiers || project.classifier
+    );
+
     this.setState(
       {
         recordings: project.recordings || [],
-        classifier: project.classifier || "",
+        classifierKeys,
         processingMode: project.processing_mode || "full",
         selectedProject: projectIndex,
+        predictionClassifier: classifierKeys[0] || "",
       },
       this.resetRecordingState
     );
@@ -902,7 +1060,17 @@ export class App extends Component {
       specViewEnd: 0,
       recordingData: recording,
       selectedRecording: recordingIndex,
-      classification: recording.classification,
+      classification: recording.classification || null,
+      classifications: getClassificationEntries(
+        recording.classifications,
+        recording.classification
+      ),
+      predictionClassifier: resolvePredictionClassifierKey(
+        this.state.predictionClassifier,
+        this.state.classifierKeys,
+        recording.classifications,
+        recording.classification
+      ),
       recordingLocation: {
         lat: recording.location.latitude,
         lng: recording.location.longitude,
@@ -918,18 +1086,45 @@ export class App extends Component {
 
       this.setState((current) => {
         const recordings = current.recordings.slice();
+        const hasClassification = Object.prototype.hasOwnProperty.call(
+          result,
+          "classification"
+        );
+        const hasClassifications = Object.prototype.hasOwnProperty.call(
+          result,
+          "classifications"
+        );
+        const hasSpecies = Object.prototype.hasOwnProperty.call(result, "species");
+        const nextClassifications = hasClassifications
+          ? getClassificationEntries(result.classifications, result.classification)
+          : current.classifications;
+
         if (recordings[recordingIndex]) {
           recordings[recordingIndex] = {
             ...recordings[recordingIndex],
-            classification: result.classification || recordings[recordingIndex].classification,
-            species: result.species || recordings[recordingIndex].species,
+            classification: hasClassification
+              ? result.classification
+              : recordings[recordingIndex].classification,
+            classifications: hasClassifications
+              ? nextClassifications
+              : recordings[recordingIndex].classifications,
+            species: hasSpecies
+              ? result.species
+              : recordings[recordingIndex].species,
           };
         }
 
         return {
           recordings,
           recordingData: result,
-          classification: result.classification || current.classification,
+          classification: hasClassification ? result.classification : current.classification,
+          classifications: nextClassifications,
+          predictionClassifier: resolvePredictionClassifierKey(
+            current.predictionClassifier,
+            current.classifierKeys,
+            nextClassifications,
+            result.classification
+          ),
           fileNotFoundDialog: false,
         };
       });
@@ -1003,8 +1198,7 @@ export class App extends Component {
   classifiedRecording = (
     projectIndex,
     recordingIndex,
-    classification,
-    classes,
+    recording,
     progress
   ) => {
     if (projectIndex !== this.state.selectedProject) {
@@ -1016,15 +1210,22 @@ export class App extends Component {
       : 0;
 
     const newRecordings = this.state.recordings.slice();
-    const nextClassification =
-      classification && Array.isArray(classification.prediction)
-        ? classification
-        : null;
+    const hasRecordingPayload = recording && typeof recording === "object";
+    const nextClassification = hasRecordingPayload
+      ? recording.classification || null
+      : null;
+    const nextClassifications = hasRecordingPayload
+      ? getClassificationEntries(recording.classifications, recording.classification)
+      : [];
     if (newRecordings[recordingIndex]) {
       newRecordings[recordingIndex] = {
         ...newRecordings[recordingIndex],
-        species: classes.join(", "),
+        species:
+          hasRecordingPayload && typeof recording.species === "string"
+            ? recording.species
+            : newRecordings[recordingIndex].species,
         classification: nextClassification,
+        classifications: nextClassifications,
       };
     }
 
@@ -1032,10 +1233,21 @@ export class App extends Component {
       this.setState({
         recordingData: {
           ...this.state.recordingData,
-          species: classes.join(", "),
+          species:
+            hasRecordingPayload && typeof recording.species === "string"
+              ? recording.species
+              : this.state.recordingData.species,
           classification: nextClassification,
+          classifications: nextClassifications,
         },
         classification: nextClassification,
+        classifications: nextClassifications,
+        predictionClassifier: resolvePredictionClassifierKey(
+          this.state.predictionClassifier,
+          this.state.classifierKeys,
+          nextClassifications,
+          nextClassification
+        ),
         classifyLoading: false,
       });
     }
@@ -1328,24 +1540,36 @@ export class App extends Component {
 
     this.loadChunkRange(nextRange.start, nextRange.end);
   };
-  handleClassifierChange = (event) => {
-    const value = event.target.value;
+  handleClassifierChange = (event, selectedOptions, reason, details) => {
+    const nextClassifierKeys = nextClassifierKeysFromSelection(
+      this.state.classifierKeys,
+      selectedOptions,
+      reason,
+      details
+    );
     this.setState((current) => {
       const projects = current.projects.slice();
       if (projects[current.selectedProject]) {
         projects[current.selectedProject] = {
           ...projects[current.selectedProject],
-          classifier: value,
+          classifiers: nextClassifierKeys,
+          classifier: nextClassifierKeys[0] || "",
         };
       }
 
       return {
-        classifier: value,
+        classifierKeys: nextClassifierKeys,
+        predictionClassifier: nextClassifierKeys[0] || "",
         classification: null,
+        classifications: [],
         projects,
       };
     });
-    backend.set_classifier(this.state.selectedProject, value);
+    backend.set_classifier(this.state.selectedProject, nextClassifierKeys);
+  };
+
+  handlePredictionClassifierChange = (classifierKey) => {
+    this.setState({ predictionClassifier: classifierKey });
   };
 
   handleProcessingModeChange = (event) => {
@@ -1457,12 +1681,13 @@ export class App extends Component {
     const {
       alertDialog,
       classification,
-      classifier,
+      classifierKeys,
       classifiers,
       classifiersLoaded,
       classifyAllLoading,
       classifyAllProgress,
       classifyLoading,
+      classifications,
       createProjectModal,
       editProject,
       fileNotFoundDialog,
@@ -1475,6 +1700,7 @@ export class App extends Component {
       projectTitle,
       projects,
       projectsLoaded,
+      predictionClassifier,
       recordingData,
       recordingLoading,
       recordingLocation,
@@ -1496,10 +1722,21 @@ export class App extends Component {
       playbackCursor,
       expansionRate,
     } = this.state;
+    const predictionClassifierKey = resolvePredictionClassifierKey(
+      predictionClassifier,
+      classifierKeys,
+      classifications,
+      classification
+    );
+    const predictionClassification =
+      getClassificationForKey(classifications, predictionClassifierKey) ||
+      (classificationMatchesClassifier(classification, predictionClassifierKey)
+        ? classification
+        : null);
     const resolvedClassification = resolveClassificationMetadata(
-      classification,
+      predictionClassification,
       classifiers,
-      classifier
+      predictionClassifierKey
     );
     const isStartupLoading = !projectsLoaded || !classifiersLoaded;
 
@@ -1560,16 +1797,47 @@ export class App extends Component {
           .toLowerCase()
           .includes(normalizedRecordingFilter);
       });
-    const selectedClassifier = findClassifierByKey(classifiers, classifier);
+    const selectedClassifiers = findClassifiersByKeys(classifiers, classifierKeys);
+    const selectedClassifier =
+      findClassifierByKey(classifiers, predictionClassifierKey) ||
+      selectedClassifiers[0] ||
+      null;
+    const predictionClassifierOptions = selectedClassifiers.map((item) => ({
+      ...item,
+      hasPrediction: Boolean(
+        getClassificationForKey(classifications, item.key)?.prediction
+      ),
+    }));
     const speciesDialogRecording =
       speciesDialog && recordings[speciesDialog.recordingIndex]
         ? recordings[speciesDialog.recordingIndex]
         : null;
+    const speciesDialogClassificationEntries = speciesDialogRecording
+      ? getClassificationEntries(
+          speciesDialogRecording.classifications,
+          speciesDialogRecording.classification
+        )
+      : classifications;
+    const speciesDialogPredictionClassifierKey = resolvePredictionClassifierKey(
+      predictionClassifierKey,
+      classifierKeys,
+      speciesDialogClassificationEntries,
+      speciesDialogRecording?.classification || classification
+    );
     const speciesDialogClassification = speciesDialogRecording
       ? resolveClassificationMetadata(
-          speciesDialogRecording.classification,
+          getClassificationForKey(
+            speciesDialogClassificationEntries,
+            speciesDialogPredictionClassifierKey
+          ) ||
+            (classificationMatchesClassifier(
+              speciesDialogRecording.classification,
+              speciesDialogPredictionClassifierKey
+            )
+              ? speciesDialogRecording.classification
+              : null),
           classifiers,
-          classifier
+          speciesDialogPredictionClassifierKey
         )
       : resolvedClassification;
     const speciesDialogOptions = speciesDialog
@@ -1663,9 +1931,14 @@ export class App extends Component {
                 recordingLocation={recordingLocation}
                 classification={resolvedClassification}
                 classifiers={classifiers}
-                classifier={classifier}
+                classifierKeys={classifierKeys}
+                predictionClassifierKey={predictionClassifierKey}
+                predictionClassifiers={predictionClassifierOptions}
                 processingMode={processingMode}
                 onClassifierChange={this.handleClassifierChange}
+                onPredictionClassifierChange={
+                  this.handlePredictionClassifierChange
+                }
                 onProcessingModeChange={this.handleProcessingModeChange}
                 classifyAllLoading={classifyAllLoading}
                 classifyAllProgress={classifyAllProgress}

@@ -1,6 +1,9 @@
 import React from "react";
+import Autocomplete from "@mui/material/Autocomplete";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
+import Checkbox from "@mui/material/Checkbox";
+import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
 import Divider from "@mui/material/Divider";
 import Fade from "@mui/material/Fade";
@@ -10,6 +13,7 @@ import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
 import Tab from "@mui/material/Tab";
 import Tabs from "@mui/material/Tabs";
+import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import IconButton from "@mui/material/IconButton";
 import LoadingButton from "@mui/lab/LoadingButton";
@@ -25,6 +29,11 @@ const PREDICTION_GRAPH_LIMIT = 20;
 
 const findClassifierByKey = (classifiers, classifierKey) =>
   classifiers.find((item) => item.key === classifierKey) || null;
+
+const findClassifiersByKeys = (classifiers, classifierKeys) =>
+  (classifierKeys || [])
+    .map((classifierKey) => findClassifierByKey(classifiers, classifierKey))
+    .filter(Boolean);
 
 const renderClassifierLabel = (item) => {
   if (!item) {
@@ -87,9 +96,12 @@ const MainContent = ({
   recordingLocation,
   classification,
   classifiers,
-  classifier,
+  classifierKeys,
+  predictionClassifierKey,
+  predictionClassifiers,
   processingMode,
   onClassifierChange,
+  onPredictionClassifierChange,
   onProcessingModeChange,
   classifyAllLoading,
   classifyAllProgress,
@@ -100,7 +112,11 @@ const MainContent = ({
     recordingLocation &&
     (Math.abs(recordingLocation.lat) > 0.000001 ||
       Math.abs(recordingLocation.lng) > 0.000001);
-  const selectedClassifier = findClassifierByKey(classifiers, classifier);
+  const selectedClassifiers = findClassifiersByKeys(classifiers, classifierKeys);
+  const selectedClassifier =
+    findClassifierByKey(classifiers, predictionClassifierKey) ||
+    selectedClassifiers[0] ||
+    null;
   const hasClassificationCategories =
     Array.isArray(classification?.classes_short) &&
     Array.isArray(classification?.prediction) &&
@@ -122,7 +138,7 @@ const MainContent = ({
   const hasVisibleWindow = hasRecording && specData.length > 0;
   const showSpectrogramLoader = specLoading && specData.length === 0;
   const classificationDisabled =
-    !selectedClassifier ||
+    selectedClassifiers.length === 0 ||
     (processingMode === "window" && !hasVisibleWindow);
 
   return (
@@ -287,19 +303,48 @@ const MainContent = ({
                   Classification
                 </Typography>
                 <Box className="classificationPanel">
-                  {classification ? (
-                    <BarChart
-                      id="predictionChart"
-                      values={predictionChartData.values}
-                      categories={predictionChartData.categories}
-                    />
-                  ) : (
-                    <Box className="emptyPanel">
-                      <Typography variant="body2" color="text.secondary">
-                        Run classification to see prediction scores.
-                      </Typography>
+                  {predictionClassifiers.length > 0 ? (
+                    <Box className="predictionTagList">
+                      {predictionClassifiers.map((item) => (
+                        <Chip
+                          key={item.key}
+                          label={item.name}
+                          size="small"
+                          clickable={item.hasPrediction}
+                          disabled={!item.hasPrediction}
+                          color={
+                            item.key === predictionClassifierKey
+                              ? "primary"
+                              : "default"
+                          }
+                          variant={
+                            item.key === predictionClassifierKey
+                              ? "filled"
+                              : "outlined"
+                          }
+                          className="predictionTagChip"
+                          onClick={() => onPredictionClassifierChange(item.key)}
+                        />
+                      ))}
                     </Box>
-                  )}
+                  ) : null}
+                  <Box className="classificationPanelBody">
+                    {classification ? (
+                      <BarChart
+                        id="predictionChart"
+                        values={predictionChartData.values}
+                        categories={predictionChartData.categories}
+                      />
+                    ) : (
+                      <Box className="emptyPanel">
+                        <Typography variant="body2" color="text.secondary">
+                          {selectedClassifiers.length === 0
+                            ? "Select one or more models to see prediction scores."
+                            : "Run classification to see prediction scores for the selected model."}
+                        </Typography>
+                      </Box>
+                    )}
+                  </Box>
                 </Box>
               </Box>
             </Box>
@@ -317,24 +362,50 @@ const MainContent = ({
           sx={{ display: tabValue === 1 ? "block" : "none" }}
         >
           <Box className="projectControls">
-            <FormControl size="small" sx={{ minWidth: 220 }}>
-              <InputLabel id="classifier-select-label">Model</InputLabel>
-              <Select
-                labelId="classifier-select-label"
-                value={classifier}
-                label="Model"
-                onChange={onClassifierChange}
-                renderValue={(value) =>
-                  renderClassifierLabel(findClassifierByKey(classifiers, value))
-                }
-              >
-                {classifiers.map((item) => (
-                  <MenuItem key={item.key} value={item.key}>
-                    {renderClassifierLabel(item)}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+            <Autocomplete
+              multiple
+              disableCloseOnSelect
+              options={classifiers}
+              value={selectedClassifiers}
+              onChange={onClassifierChange}
+              getOptionLabel={(option) => option?.name || option?.key || ""}
+              isOptionEqualToValue={(option, value) => option.key === value.key}
+              renderOption={(props, option, { selected }) => (
+                <li {...props}>
+                  <Checkbox
+                    size="small"
+                    checked={selected}
+                    sx={{ mr: 1 }}
+                  />
+                  {renderClassifierLabel(option)}
+                </li>
+              )}
+              renderTags={(value, getTagProps) =>
+                value.map((option, index) => (
+                  <Chip
+                    {...getTagProps({ index })}
+                    key={option.key}
+                    size="small"
+                    label={
+                      option.provider_label
+                        ? `${option.name} · ${option.provider_label}`
+                        : option.name
+                    }
+                    className="classifierSelectionChip"
+                  />
+                ))
+              }
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label="Models"
+                  placeholder={
+                    selectedClassifiers.length === 0 ? "Search models" : ""
+                  }
+                />
+              )}
+              className="classifierAutocomplete"
+            />
             <FormControl size="small" sx={{ minWidth: 190 }}>
               <InputLabel id="prediction-range-label">
                 Prediction range

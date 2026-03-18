@@ -108,7 +108,8 @@ class SpeciesPayload(BaseModel):
 
 
 class ClassifierPayload(BaseModel):
-  classifierKey: str
+  classifierKey: str | None = None
+  classifierKeys: list[str] | None = None
 
 
 class ProcessingModePayload(BaseModel):
@@ -176,8 +177,27 @@ def find_classifier(classifier_key):
 def public_recording_payload(recording):
   public_recording = dict(recording)
   public_recording.pop("_classification_path", None)
-  if not isinstance(public_recording.get("classification"), dict):
+  classification = public_recording.get("classification")
+  if isinstance(classification, dict):
+    classification = dict(classification)
+    classification.pop("_classification_path", None)
+    public_recording["classification"] = classification
+  else:
     public_recording.pop("classification", None)
+
+  classifications = public_recording.get("classifications")
+  if isinstance(classifications, list):
+    public_recording["classifications"] = [
+      {
+        key: value
+        for key, value in dict(classification).items()
+        if key != "_classification_path"
+      }
+      for classification in classifications
+      if isinstance(classification, dict)
+    ]
+  else:
+    public_recording.pop("classifications", None)
   return public_recording
 
 
@@ -220,6 +240,17 @@ def compact_classification_payload(classification):
   return compact
 
 
+def compact_classifications_payload(classifications):
+  return [
+    compact
+    for compact in (
+      compact_classification_payload(classification)
+      for classification in classifications or []
+    )
+    if compact
+  ]
+
+
 def normalize_project_classifiers():
   if not classifiers:
     return
@@ -228,10 +259,21 @@ def normalize_project_classifiers():
   default_key = classifiers[0]["key"]
   changed = False
   for project in projects:
-    if project.get("classifier") in available_keys:
-      continue
-    project["classifier"] = default_key
-    changed = True
+    raw_keys = project.get("classifiers")
+    if isinstance(raw_keys, list):
+      next_keys = [
+        key for key in raw_keys
+        if isinstance(key, str) and key in available_keys
+      ]
+    else:
+      current_key = project.get("classifier")
+      next_keys = [current_key] if current_key in available_keys else [default_key]
+
+    next_primary = next_keys[0] if next_keys else ""
+    if project.get("classifiers") != next_keys or project.get("classifier") != next_primary:
+      project["classifiers"] = next_keys
+      project["classifier"] = next_primary
+      changed = True
 
   if changed:
     save_project_data(projects)
@@ -244,16 +286,52 @@ def load_classifiers():
     normalize_project_classifiers()
 
 
-def get_project_classifier(project_index):
+def get_project_classifier_keys(project_index):
   with state_lock:
-    classifier_config = find_classifier(projects[project_index].get("classifier"))
-    if classifier_config is None:
-      if not classifiers:
-        raise RuntimeError("No classifier models are available.")
-      classifier_config = classifiers[0]
-      projects[project_index]["classifier"] = classifier_config["key"]
-      save_project_data(projects)
-    return dict(classifier_config)
+    project = projects[project_index]
+    if isinstance(project.get("classifiers"), list):
+      return [
+        key
+        for key in project["classifiers"]
+        if isinstance(key, str) and find_classifier(key) is not None
+      ]
+
+    fallback_key = project.get("classifier")
+    if isinstance(fallback_key, str) and find_classifier(fallback_key) is not None:
+      return [fallback_key]
+
+    return [classifiers[0]["key"]] if classifiers else []
+
+
+def get_project_classifiers(project_index):
+  classifier_keys = get_project_classifier_keys(project_index)
+  classifier_configs = [
+    dict(classifier_config)
+    for classifier_key in classifier_keys
+    if (classifier_config := find_classifier(classifier_key)) is not None
+  ]
+
+  if not classifier_configs:
+    raise RuntimeError("No classifier models are selected.")
+
+  return classifier_configs
+
+
+def validate_classifier_configs(classifier_configs):
+  if not classifier_configs:
+    raise RuntimeError("No classifier models are selected.")
+
+  for classifier_config in classifier_configs:
+    try:
+      classifier_service.validate(classifier_config)
+    except Exception as error:
+      classifier_name = classifier_config.get("name") or classifier_config.get("key") or "classifier"
+      raise RuntimeError(f"{classifier_name}: {error}") from error
+
+
+def set_project_classifier_keys(project, classifier_keys):
+  project["classifiers"] = list(classifier_keys)
+  project["classifier"] = classifier_keys[0] if classifier_keys else ""
 
 
 def _normalize_processing_mode(value):
@@ -307,8 +385,91 @@ def _write_windowed_audio(recording_path, window_range):
   return temp_file.name
 
 
+def classification_label_names(classification):
+  if not isinstance(classification, dict):
+    return []
+
+  labels = [
+    int(label)
+    for label in classification.get("labels", [])
+    if isinstance(label, (int, float))
+  ]
+  classes_short = classification.get("classes_short")
+  classes = classification.get("classes")
+  resolved = []
+
+  for label_index in labels:
+    if isinstance(classes_short, list) and 0 <= label_index < len(classes_short):
+      value = classes_short[label_index]
+    elif isinstance(classes, list) and 0 <= label_index < len(classes):
+      value = classes[label_index]
+    else:
+      value = None
+
+    if value is None:
+      continue
+    text = str(value).strip()
+    if text and text not in resolved:
+      resolved.append(text)
+
+  return resolved
+
+
+def vote_species_classes(classifier_keys, classifications):
+  if not classifier_keys:
+    return []
+
+  classification_by_key = {
+    classification["classifier_key"]: classification
+    for classification in classifications or []
+    if isinstance(classification, dict) and classification.get("classifier_key")
+  }
+  votes = {}
+  first_seen = {}
+
+  for classifier_index, classifier_key in enumerate(classifier_keys):
+    labels = classification_label_names(classification_by_key.get(classifier_key))
+    for label_index, label in enumerate(labels):
+      votes[label] = votes.get(label, 0) + 1
+      first_seen.setdefault(label, (classifier_index, label_index))
+
+  majority_threshold = (len(classifier_keys) // 2) + 1
+  majority_labels = [
+    label
+    for label, count in votes.items()
+    if count >= majority_threshold
+  ]
+  majority_labels.sort(
+    key=lambda label: (
+      -votes[label],
+      first_seen.get(label, (len(classifier_keys), 0)),
+    )
+  )
+  if majority_labels:
+    return majority_labels
+
+  first_selected_key = classifier_keys[0]
+  return classification_label_names(classification_by_key.get(first_selected_key))
+
+
+def select_primary_classification(classifier_keys, classifications):
+  classification_by_key = {
+    classification["classifier_key"]: classification
+    for classification in classifications or []
+    if isinstance(classification, dict) and classification.get("classifier_key")
+  }
+
+  for classifier_key in classifier_keys:
+    classification = classification_by_key.get(classifier_key)
+    if classification is not None:
+      return classification
+
+  return next(iter(classification_by_key.values()), None)
+
+
 def predict_recording(project_index, recording_path, processing_mode, window_range=None):
-  classifier_config = get_project_classifier(project_index)
+  classifier_configs = get_project_classifiers(project_index)
+  classifier_keys = [item["key"] for item in classifier_configs]
   processing_mode = _normalize_processing_mode(processing_mode)
   temp_path = None
 
@@ -318,12 +479,20 @@ def predict_recording(project_index, recording_path, processing_mode, window_ran
         raise ValueError("Window mode needs the currently visible spectrogram window.")
       temp_path = _write_windowed_audio(recording_path, window_range)
 
-    classification, classes = classifier_service.predict(
-      classifier_config,
-      temp_path or recording_path,
-      proclen=0,
+    classifications = []
+    for classifier_config in classifier_configs:
+      classification, _ = classifier_service.predict(
+        classifier_config,
+        temp_path or recording_path,
+        proclen=0,
+      )
+      classifications.append(classification)
+
+    return (
+      select_primary_classification(classifier_keys, classifications),
+      classifications,
+      vote_species_classes(classifier_keys, classifications),
     )
-    return classification, classes
   finally:
     if temp_path and os.path.exists(temp_path):
       try:
@@ -341,16 +510,31 @@ def get_recording_or_404(project_index, recording_index):
     return recording
 
 
-def set_recording_prediction(project_index, recording_index, classification, classes):
+def set_recording_prediction(project_index, recording_index, classifications, classes):
   with state_lock:
     try:
       recording = projects[project_index]["recordings"][recording_index]
     except IndexError:
-      return
+      return None
 
-    recording["classification"] = compact_classification_payload(classification)
+    classifier_keys = get_project_classifier_keys(project_index)
+    compact_classifications = compact_classifications_payload(classifications)
+    primary_classification = compact_classification_payload(
+      select_primary_classification(classifier_keys, compact_classifications)
+    )
+    if primary_classification:
+      recording["classification"] = primary_classification
+    else:
+      recording.pop("classification", None)
+
+    if compact_classifications:
+      recording["classifications"] = compact_classifications
+    else:
+      recording.pop("classifications", None)
+
     recording["species"] = ", ".join(classes)
     save_project_data(projects)
+    return public_recording_payload(recording)
 
 
 def set_recording_duration(project_index, recording_index, info):
@@ -371,13 +555,12 @@ def emit_recording_loading(project_index, recording_index):
   event_broker.emit("setRecordingLoading", project_index, recording_index)
 
 
-def emit_classified_recording(project_index, recording_index, classification, classes, progress):
+def emit_classified_recording(project_index, recording_index, recording, progress):
   event_broker.emit(
     "classifiedRecording",
     project_index,
     recording_index,
-    compact_classification_payload(classification),
-    classes,
+    recording,
     progress,
   )
 
@@ -399,19 +582,19 @@ def classify_async(project_index, recording_index, window_range=None):
     with state_lock:
       recording = dict(projects[project_index]["recordings"][recording_index])
       processing_mode = _normalize_processing_mode(projects[project_index].get("processing_mode"))
-      classifier_config = get_project_classifier(project_index)
+      classifier_configs = get_project_classifiers(project_index)
 
     try:
-      classifier_service.validate(classifier_config)
+      validate_classifier_configs(classifier_configs)
     except Exception as error:
       emit_classification_error(str(error))
-      emit_classified_recording(project_index, recording_index, {}, [], 100)
+      emit_classified_recording(project_index, recording_index, {}, 100)
       return
 
     emit_recording_loading(project_index, recording_index)
 
     try:
-      classification, classes = predict_recording(
+      _, classifications, classes = predict_recording(
         project_index,
         recording["path"],
         processing_mode,
@@ -422,13 +605,18 @@ def classify_async(project_index, recording_index, window_range=None):
         emit_classification_error(str(error))
       else:
         emit_memory_error()
-      classification, classes = {}, []
+      classifications, classes = [], []
     except Exception as error:
       emit_classification_error(str(error))
-      classification, classes = {}, []
+      classifications, classes = [], []
 
-    set_recording_prediction(project_index, recording_index, classification, classes)
-    emit_classified_recording(project_index, recording_index, classification, classes, 100)
+    updated_recording = set_recording_prediction(
+      project_index,
+      recording_index,
+      classifications,
+      classes,
+    ) or {}
+    emit_classified_recording(project_index, recording_index, updated_recording, 100)
   except Exception as error:
     emit_classification_error(str(error))
 
@@ -442,7 +630,7 @@ def classify_all_async(project_index, indices=None, window_range=None):
     return
 
   try:
-    classifier_service.validate(get_project_classifier(project_index))
+    validate_classifier_configs(get_project_classifiers(project_index))
   except Exception as error:
     emit_classification_error(str(error))
     return
@@ -463,7 +651,7 @@ def classify_all_async(project_index, indices=None, window_range=None):
         set_recording_duration(project_index, index, info)
 
       try:
-        classification, classes = predict_recording(
+        _, classifications, classes = predict_recording(
           project_index,
           recording["path"],
           processing_mode,
@@ -474,23 +662,34 @@ def classify_all_async(project_index, indices=None, window_range=None):
           emit_classification_error(str(error))
         else:
           emit_memory_error()
-        classification, classes = {}, []
+        classifications, classes = [], []
       except Exception as error:
         emit_classification_error(str(error))
-        classification, classes = {}, []
+        classifications, classes = [], []
 
-      set_recording_prediction(project_index, index, classification, classes)
+      updated_recording = set_recording_prediction(
+        project_index,
+        index,
+        classifications,
+        classes,
+      ) or {}
     else:
-      classification, classes = None, []
+      updated_recording = {}
 
     progress = ((position + 1) / len(active_indices)) * 100
-    emit_classified_recording(project_index, index, classification, classes, progress)
+    emit_classified_recording(project_index, index, updated_recording, progress)
 
 
 def export_csv_file(project_index, path):
   with state_lock:
     project = dict(projects[project_index])
     recordings = [dict(item) for item in project["recordings"]]
+    classifier_keys = list(project.get("classifiers") or [])
+
+  classifier_configs = [
+    find_classifier(classifier_key) or {"key": classifier_key, "name": classifier_key}
+    for classifier_key in classifier_keys
+  ]
 
   with open(path, "w", newline="\n") as csvfile:
     writer = csv.writer(csvfile, delimiter=";")
@@ -503,9 +702,20 @@ def export_csv_file(project_index, path):
         "longitude",
         "temperature",
         "species",
+        *[
+          f'{classifier_config.get("name") or classifier_config["key"]} ({classifier_config["key"]})'
+          for classifier_config in classifier_configs
+        ],
       ]
     )
-    for recording in recordings:
+    for recording_index, recording in enumerate(recordings):
+      classification_payload = load_recording_classification_data(project_index, recording_index) or {}
+      classifications = classification_payload.get("classifications") or []
+      classification_by_key = {
+        classification["classifier_key"]: classification
+        for classification in classifications
+        if isinstance(classification, dict) and classification.get("classifier_key")
+      }
       writer.writerow(
         [
           recording["path"],
@@ -517,6 +727,10 @@ def export_csv_file(project_index, path):
           recording["location"]["longitude"],
           recording.get("temperature", ""),
           recording.get("species", ""),
+          *[
+            ", ".join(classification_label_names(classification_by_key.get(classifier_key)))
+            for classifier_key in classifier_keys
+          ],
         ]
       )
 
@@ -648,16 +862,15 @@ def get_projects():
 def add_project(payload: ProjectPayload):
   with state_lock:
     default_classifier = classifiers[0]["key"] if classifiers else DEFAULT_CLASSIFIER_KEY
-    projects.append(
-      {
-        "title": payload.title,
-        "description": payload.description,
-        "creation_date": time.time(),
-        "recordings": [],
-        "classifier": default_classifier,
-        "processing_mode": "full",
-      }
-    )
+    project = {
+      "title": payload.title,
+      "description": payload.description,
+      "creation_date": time.time(),
+      "recordings": [],
+      "processing_mode": "full",
+    }
+    set_project_classifier_keys(project, [default_classifier])
+    projects.append(project)
     save_project_data(projects)
   return True
 
@@ -743,7 +956,8 @@ def get_recording(project_index: int, recording_index: int):
   updated_recording = set_recording_duration(project_index, recording_index, info)
   full_classification = load_recording_classification_data(project_index, recording_index)
   if full_classification is not None:
-    updated_recording["classification"] = full_classification
+    updated_recording["classification"] = full_classification.get("classification")
+    updated_recording["classifications"] = full_classification.get("classifications") or []
   return {
     "recording": public_recording_payload(updated_recording),
     "spectrogram": spectrogram,
@@ -762,9 +976,21 @@ def set_species(project_index: int, recording_index: int, payload: SpeciesPayloa
 @app.post("/api/projects/{project_index}/classifier")
 def set_classifier(project_index: int, payload: ClassifierPayload):
   with state_lock:
-    if classifiers and find_classifier(payload.classifierKey) is None:
-      raise HTTPException(status_code=400, detail="Unknown classifier.")
-    projects[project_index]["classifier"] = payload.classifierKey
+    requested_keys = (
+      payload.classifierKeys
+      if isinstance(payload.classifierKeys, list)
+      else ([payload.classifierKey] if payload.classifierKey else [])
+    )
+    normalized_keys = []
+    for classifier_key in requested_keys:
+      if not isinstance(classifier_key, str) or not classifier_key.strip():
+        continue
+      if classifiers and find_classifier(classifier_key) is None:
+        raise HTTPException(status_code=400, detail=f"Unknown classifier: {classifier_key}")
+      if classifier_key not in normalized_keys:
+        normalized_keys.append(classifier_key)
+
+    set_project_classifier_keys(projects[project_index], normalized_keys)
     save_project_data(projects)
   return True
 

@@ -260,10 +260,18 @@ body {
   height: 240px;
   min-height: 240px;
   display: flex;
+  flex-direction: column;
+  gap: 10px;
   align-items: stretch;
   justify-content: stretch;
   width: 100%;
   margin-top: 4px;
+}
+
+.classificationPanelBody {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
 }
 
 .mapCard {
@@ -279,7 +287,8 @@ body {
 }
 
 .mapCard > *,
-.classificationPanel > * {
+.classificationPanelBody,
+.classificationPanelBody > * {
   width: 100%;
   height: 100%;
   flex: 1 1 auto;
@@ -406,10 +415,29 @@ body {
   align-items: center;
 }
 
+.classifierAutocomplete {
+  min-width: 320px;
+  flex: 1 1 340px;
+}
+
+.classifierSelectionChip {
+  max-width: 100%;
+}
+
 .classifierOptionLabel {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+}
+
+.predictionTagList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.predictionTagChip {
+  max-width: 100%;
 }
 
 .providerChip {

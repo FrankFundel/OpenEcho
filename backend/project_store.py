@@ -53,6 +53,19 @@ CREATE TABLE IF NOT EXISTS recordings (
   FOREIGN KEY (project_index) REFERENCES projects(project_index) ON DELETE CASCADE
 )
 """
+RECORDING_CLASSIFICATIONS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS recording_classifications (
+  project_index INTEGER NOT NULL,
+  recording_index INTEGER NOT NULL,
+  classifier_key TEXT NOT NULL,
+  classification_labels BLOB,
+  classification_path TEXT,
+  PRIMARY KEY (project_index, recording_index, classifier_key),
+  FOREIGN KEY (project_index, recording_index)
+    REFERENCES recordings(project_index, recording_index)
+    ON DELETE CASCADE
+)
+"""
 
 
 def _connect():
@@ -62,6 +75,7 @@ def _connect():
   connection.execute("PRAGMA foreign_keys = ON")
   _create_projects_table(connection)
   connection.execute(RECORDINGS_TABLE_SQL)
+  connection.execute(RECORDING_CLASSIFICATIONS_TABLE_SQL)
   connection.commit()
   _ensure_project_columns(connection)
   _ensure_recording_columns(connection)
@@ -171,6 +185,25 @@ def _normalize_classifier_key(value):
   return CLASSIFIER_KEY_ALIASES.get(key, key)
 
 
+def _parse_classifier_key_list(value):
+  if isinstance(value, list):
+    return value
+
+  if not isinstance(value, str):
+    return None
+
+  text = value.strip()
+  if not text.startswith("["):
+    return None
+
+  try:
+    parsed = json.loads(text)
+  except json.JSONDecodeError:
+    return None
+
+  return parsed if isinstance(parsed, list) else None
+
+
 def _load_classifier_catalog(classifier_only):
   try:
     from backend.inference.bacpipe_provider import (
@@ -210,7 +243,25 @@ def _stored_index_classifier_keys():
   return keys or [DEFAULT_CLASSIFIER_KEY]
 
 
-def _classifier_key_from_project(project):
+def _normalize_classifier_keys(values):
+  available_keys = _available_classifier_keys()
+  normalized = []
+  for raw_value in values or []:
+    key = _normalize_classifier_key(raw_value)
+    if key in available_keys and key not in normalized:
+      normalized.append(key)
+  return normalized
+
+
+def _classifier_keys_from_project(project):
+  for raw_value in (
+    project.get("classifier_keys"),
+    project.get("classifiers"),
+    _parse_classifier_key_list(project.get("classifier")),
+  ):
+    if isinstance(raw_value, list):
+      return _normalize_classifier_keys(raw_value)
+
   available_keys = _available_classifier_keys()
 
   for raw_value in (
@@ -219,19 +270,31 @@ def _classifier_key_from_project(project):
   ):
     key = _normalize_classifier_key(raw_value)
     if key in available_keys:
-      return key
+      return [key]
 
   raw_index = project.get("classifier")
   try:
     index = int(raw_index or 0)
   except (TypeError, ValueError):
-    return DEFAULT_CLASSIFIER_KEY
+    return [DEFAULT_CLASSIFIER_KEY]
 
   stored_keys = _stored_index_classifier_keys()
   if 0 <= index < len(stored_keys) and stored_keys[index] in available_keys:
-    return stored_keys[index]
+    return [stored_keys[index]]
 
-  return DEFAULT_CLASSIFIER_KEY
+  return [DEFAULT_CLASSIFIER_KEY]
+
+
+def _project_primary_classifier_key(classifier_keys):
+  return classifier_keys[0] if classifier_keys else ""
+
+
+def _project_fallback_classifier_key(classifier_keys):
+  return classifier_keys[0] if classifier_keys else DEFAULT_CLASSIFIER_KEY
+
+
+def _classifier_key_from_project(project):
+  return _project_fallback_classifier_key(_classifier_keys_from_project(project))
 
 
 def _round_prediction_value(value):
@@ -332,7 +395,127 @@ def _normalize_classification(classification, fallback_key):
   return summary
 
 
-def _normalize_recording(recording, classifier_key):
+def _normalize_classification_entry(classification, fallback_key):
+  if not isinstance(classification, dict):
+    return None
+
+  normalized = _normalize_classification(classification, fallback_key)
+  if normalized is None:
+    normalized = _normalize_classification_summary(classification, fallback_key)
+  if normalized is None:
+    return None
+
+  classification_path = classification.get("_classification_path")
+  if isinstance(classification_path, str) and classification_path:
+    normalized["_classification_path"] = classification_path
+
+  return normalized
+
+
+def _merge_classification_entries(existing, incoming):
+  if existing is None:
+    return dict(incoming)
+
+  merged = dict(existing)
+  for field_name in (
+    "classifier_key",
+    "labels",
+    "prediction",
+    "classes",
+    "classes_short",
+    "_classification_path",
+  ):
+    if field_name not in incoming:
+      continue
+
+    if field_name == "prediction":
+      if isinstance(incoming.get(field_name), list):
+        merged[field_name] = incoming[field_name]
+      continue
+
+    if field_name in {"classes", "classes_short"}:
+      if incoming.get(field_name):
+        merged[field_name] = incoming[field_name]
+      continue
+
+    merged[field_name] = incoming[field_name]
+
+  return merged
+
+
+def _iter_recording_classifications(recording):
+  raw_classifications = recording.get("classifications")
+  if isinstance(raw_classifications, dict):
+    for classifier_key, value in raw_classifications.items():
+      if not isinstance(value, dict):
+        continue
+      item = dict(value)
+      item.setdefault("classifier_key", classifier_key)
+      yield item
+  elif isinstance(raw_classifications, list):
+    for item in raw_classifications:
+      if isinstance(item, dict):
+        yield item
+
+  classification = recording.get("classification")
+  if isinstance(classification, dict):
+    item = dict(classification)
+    classification_path = recording.get("_classification_path")
+    if (
+      isinstance(classification_path, str) and
+      classification_path and
+      "_classification_path" not in item
+    ):
+      item["_classification_path"] = classification_path
+    yield item
+
+
+def _sort_classifications(classifications, classifier_keys):
+  if not classifications:
+    return []
+
+  order_by_key = {key: index for index, key in enumerate(classifier_keys)}
+  return sorted(
+    classifications,
+    key=lambda item: (
+      order_by_key.get(item["classifier_key"], len(order_by_key)),
+      item["classifier_key"],
+    ),
+  )
+
+
+def _normalize_recording_classifications(recording, classifier_keys):
+  fallback_key = _project_fallback_classifier_key(classifier_keys)
+  entries_by_key = {}
+  for raw_classification in _iter_recording_classifications(recording):
+    entry = _normalize_classification_entry(raw_classification, fallback_key)
+    if entry is None:
+      continue
+    key = entry["classifier_key"]
+    entries_by_key[key] = _merge_classification_entries(entries_by_key.get(key), entry)
+
+  return _sort_classifications(list(entries_by_key.values()), classifier_keys)
+
+
+def _select_primary_classification(classifications, classifier_keys):
+  if not classifications:
+    return None
+
+  classifications_by_key = {
+    item["classifier_key"]: item
+    for item in classifications
+    if isinstance(item, dict) and item.get("classifier_key")
+  }
+
+  for classifier_key in classifier_keys:
+    classification = classifications_by_key.get(classifier_key)
+    if classification is not None:
+      return dict(classification)
+
+  return dict(classifications[0])
+
+
+def _normalize_recording(recording, classifier_keys):
   location = recording.get("location") or {}
   normalized = {
     "title": str(recording.get("title") or ""),
@@ -359,32 +542,31 @@ def _normalize_recording(recording, classifier_key):
     except (TypeError, ValueError):
       continue
 
-  classification = _normalize_classification(recording.get("classification"), classifier_key)
-  if classification is not None:
-    normalized["classification"] = classification
-  else:
-    summary = _normalize_classification_summary(recording.get("classification"), classifier_key)
-    classification_path = recording.get("_classification_path")
-    if summary is not None and isinstance(classification_path, str) and classification_path:
-      normalized["classification"] = summary
-      normalized["_classification_path"] = classification_path
+  classifications = _normalize_recording_classifications(recording, classifier_keys)
+  if classifications:
+    normalized["classifications"] = classifications
+
+  primary_classification = _select_primary_classification(classifications, classifier_keys)
+  if primary_classification is not None:
+    normalized["classification"] = primary_classification
 
   return normalized
 
 
 def _normalize_project(project):
-  classifier_key = _classifier_key_from_project(project)
+  classifier_keys = _classifier_keys_from_project(project)
   return {
     "title": str(project.get("title") or ""),
     "description": str(project.get("description") or ""),
     "creation_date": float(project.get("creation_date", 0) or 0),
-    "classifier": classifier_key,
+    "classifier": _project_primary_classifier_key(classifier_keys),
+    "classifiers": classifier_keys,
     "processing_mode": _normalize_processing_mode(
       project.get("processing_mode"),
       project.get("maxproclen"),
     ),
     "recordings": [
-      _normalize_recording(recording, classifier_key)
+      _normalize_recording(recording, classifier_keys)
       for recording in project.get("recordings") or []
     ],
   }
@@ -552,6 +734,30 @@ def _classification_summary_from_row(row):
   }
 
 
+def _classification_entry_from_row(
+  classifier_key,
+  labels_blob,
+  classification_path,
+  include_predictions,
+):
+  labels = _unpack_int_array(labels_blob)
+  summary = {
+    "classifier_key": classifier_key or DEFAULT_CLASSIFIER_KEY,
+    "labels": labels,
+  }
+
+  if classification_path:
+    if include_predictions:
+      return _load_classification_file(
+        classification_path,
+        summary["classifier_key"],
+        summary["labels"],
+      )
+    summary["_classification_path"] = classification_path
+
+  return summary
+
+
 def _full_classification_from_row(row):
   summary = _classification_summary_from_row(row)
   if summary is None:
@@ -571,7 +777,7 @@ def _full_classification_from_row(row):
   return summary
 
 
-def _recording_from_row(row, include_predictions):
+def _recording_from_row(row, include_predictions, classifications, classifier_keys):
   recording = {
     "title": row["title"],
     "path": row["path"],
@@ -591,15 +797,25 @@ def _recording_from_row(row, include_predictions):
   if row["temperature"] is not None:
     recording["temperature"] = row["temperature"]
 
-  classification = (
-    _full_classification_from_row(row)
-    if include_predictions
-    else _classification_summary_from_row(row)
-  )
+  if classifications:
+    recording["classifications"] = _sort_classifications(classifications, classifier_keys)
+
+  classification = _select_primary_classification(classifications, classifier_keys)
+  if classification is None:
+    classification = (
+      _full_classification_from_row(row)
+      if include_predictions
+      else _classification_summary_from_row(row)
+    )
   if classification is not None:
+    if (
+      not include_predictions and
+      row["classification_path"] and
+      "_classification_path" not in classification
+    ):
+      classification = dict(classification)
+      classification["_classification_path"] = row["classification_path"]
     recording["classification"] = classification
-    if row["classification_path"]:
-      recording["_classification_path"] = row["classification_path"]
 
   return recording
 
@@ -712,10 +928,47 @@ def load_projects(include_predictions=False):
       """
     ).fetchall()
 
+    recording_classification_rows = connection.execute(
+      """
+      SELECT
+        project_index,
+        recording_index,
+        classifier_key,
+        classification_labels,
+        classification_path
+      FROM recording_classifications
+      ORDER BY project_index, recording_index, classifier_key
+      """
+    ).fetchall()
+
+  classifier_keys_by_project = {
+    row["project_index"]: _classifier_keys_from_project({"classifier": row["classifier"]})
+    for row in project_rows
+  }
+  classifications_by_recording = {}
+  for row in recording_classification_rows:
+    recording_key = (row["project_index"], row["recording_index"])
+    classifications_by_recording.setdefault(recording_key, []).append(
+      _classification_entry_from_row(
+        row["classifier_key"],
+        row["classification_labels"],
+        row["classification_path"],
+        include_predictions=include_predictions,
+      )
+    )
+
   recordings_by_project = {}
   for row in recording_rows:
     recordings_by_project.setdefault(row["project_index"], []).append(
-      _recording_from_row(row, include_predictions=include_predictions)
+      _recording_from_row(
+        row,
+        include_predictions=include_predictions,
+        classifications=classifications_by_recording.get(
+          (row["project_index"], row["recording_index"]),
+          [],
+        ),
+        classifier_keys=classifier_keys_by_project.get(row["project_index"], []),
+      )
     )
 
   return [
@@ -723,7 +976,10 @@ def load_projects(include_predictions=False):
       "title": row["title"],
       "description": row["description"],
       "creation_date": row["creation_date"],
-      "classifier": row["classifier"],
+      "classifier": _project_primary_classifier_key(
+        classifier_keys_by_project.get(row["project_index"], [])
+      ),
+      "classifiers": classifier_keys_by_project.get(row["project_index"], []),
       "processing_mode": _normalize_processing_mode(row["processing_mode"]),
       "recordings": recordings_by_project.get(row["project_index"], []),
     }
@@ -750,10 +1006,61 @@ def load_recording_classification(project_index, recording_index):
       (project_index, recording_index),
     ).fetchone()
 
+    project_row = connection.execute(
+      """
+      SELECT classifier
+      FROM projects
+      WHERE project_index = ?
+      """,
+      (project_index,),
+    ).fetchone()
+
+    classification_rows = connection.execute(
+      """
+      SELECT
+        classifier_key,
+        classification_labels,
+        classification_path
+      FROM recording_classifications
+      WHERE project_index = ? AND recording_index = ?
+      ORDER BY classifier_key
+      """,
+      (project_index, recording_index),
+    ).fetchall()
+
   if row is None:
     return None
 
-  return _full_classification_from_row(row)
+  classifier_keys = _classifier_keys_from_project(
+    {"classifier": project_row["classifier"] if project_row is not None else DEFAULT_CLASSIFIER_KEY}
+  )
+  classifications = [
+    _classification_entry_from_row(
+      classification_row["classifier_key"],
+      classification_row["classification_labels"],
+      classification_row["classification_path"],
+      include_predictions=True,
+    )
+    for classification_row in classification_rows
+  ]
+  if classifications:
+    ordered_classifications = _sort_classifications(classifications, classifier_keys)
+    return {
+      "classification": _select_primary_classification(
+        ordered_classifications,
+        classifier_keys,
+      ),
+      "classifications": ordered_classifications,
+    }
+
+  classification = _full_classification_from_row(row)
+  if classification is None:
+    return None
+
+  return {
+    "classification": classification,
+    "classifications": [classification],
+  }
 
 
 def save_projects(projects):
@@ -762,6 +1069,7 @@ def save_projects(projects):
 
   with _connect() as connection:
     with connection:
+      connection.execute("DELETE FROM recording_classifications")
       connection.execute("DELETE FROM recordings")
       connection.execute("DELETE FROM projects")
 
@@ -783,27 +1091,38 @@ def save_projects(projects):
             project["title"],
             project["description"],
             project["creation_date"],
-            project["classifier"],
+            json.dumps(project["classifiers"]),
             project["processing_mode"],
           ),
         )
 
         for recording_index, recording in enumerate(project["recordings"]):
-          classification = recording.get("classification")
-          classification_key = None
-          classification_labels = None
-          classification_path = None
+          classifications = _sort_classifications(
+            [
+              dict(classification)
+              for classification in recording.get("classifications") or []
+              if isinstance(classification, dict)
+            ],
+            project["classifiers"],
+          )
+          primary_classification = _select_primary_classification(
+            classifications,
+            project["classifiers"],
+          )
+          primary_classification_key = None
+          primary_classification_labels = None
+          primary_classification_path = None
 
-          if classification is not None:
-            classification_key = classification["classifier_key"]
-            classification_labels = _pack_int_array(classification["labels"])
-            if isinstance(classification.get("prediction"), list):
-              classification_path = _write_classification_file(classification)
+          if primary_classification is not None:
+            primary_classification_key = primary_classification["classifier_key"]
+            primary_classification_labels = _pack_int_array(primary_classification["labels"])
+            if isinstance(primary_classification.get("prediction"), list):
+              primary_classification_path = _write_classification_file(primary_classification)
             else:
-              classification_path = recording.get("_classification_path")
+              primary_classification_path = primary_classification.get("_classification_path")
 
-          if classification_path:
-            referenced_paths.add(classification_path)
+          if primary_classification_path:
+            referenced_paths.add(primary_classification_path)
 
           connection.execute(
             """
@@ -839,10 +1158,40 @@ def save_projects(projects):
               recording.get("duration"),
               recording.get("temperature"),
               recording.get("species", ""),
-              classification_key,
-              classification_labels,
-              classification_path,
+              primary_classification_key,
+              primary_classification_labels,
+              primary_classification_path,
             ),
           )
+
+          for classification in classifications:
+            classification_path = None
+            if isinstance(classification.get("prediction"), list):
+              classification_path = _write_classification_file(classification)
+            else:
+              classification_path = classification.get("_classification_path")
+
+            if classification_path:
+              referenced_paths.add(classification_path)
+
+            connection.execute(
+              """
+              INSERT INTO recording_classifications (
+                project_index,
+                recording_index,
+                classifier_key,
+                classification_labels,
+                classification_path
+              )
+              VALUES (?, ?, ?, ?, ?)
+              """,
+              (
+                project_index,
+                recording_index,
+                classification["classifier_key"],
+                _pack_int_array(classification["labels"]),
+                classification_path,
+              ),
+            )
 
   _cleanup_classification_files(referenced_paths)

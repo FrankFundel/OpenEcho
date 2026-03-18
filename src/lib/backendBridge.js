@@ -333,10 +333,10 @@ class BackendBridge {
     );
   }
 
-  set_classifier(projectIndex, classifierKey) {
+  set_classifier(projectIndex, classifierKeys) {
     return this.request(`/api/projects/${projectIndex}/classifier`, {
       method: "POST",
-      body: JSON.stringify({ classifierKey }),
+      body: JSON.stringify({ classifierKeys }),
     });
   }
 
