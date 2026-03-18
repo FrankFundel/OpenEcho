@@ -71,9 +71,10 @@ const MainContent = ({
   waveData,
   recordingData,
   specStart,
+  specViewStart,
+  specViewEnd,
   playbackCursor,
-  onLoadData,
-  onLoadMore,
+  onVisibleWindowChange,
   playPause,
   onPlayPause,
   expansionRate,
@@ -118,7 +119,8 @@ const MainContent = ({
     classification,
     predictionCategories
   );
-  const hasVisibleWindow = hasRecording && specData.length > 0 && !specLoading;
+  const hasVisibleWindow = hasRecording && specData.length > 0;
+  const showSpectrogramLoader = specLoading && specData.length === 0;
   const classificationDisabled =
     !selectedClassifier ||
     (processingMode === "window" && !hasVisibleWindow);
@@ -129,7 +131,10 @@ const MainContent = ({
         <Tab label="Spectrogram" />
       </Tabs>
       <Box className="spectrogramSection">
-        <Fade in={specLoading} style={{ position: "absolute", zIndex: 100 }}>
+        <Fade
+          in={showSpectrogramLoader}
+          style={{ position: "absolute", zIndex: 100 }}
+        >
           <div className="loadingOverlay">
             <BackdropFilter
               filter={"blur(10px)"}
@@ -146,7 +151,6 @@ const MainContent = ({
             specData.length > 0 ? (
               <Spectrogram
                 id="spectrogram"
-                init={specLoading}
                 data={specData}
                 waveData={waveData}
                 maxF={
@@ -160,11 +164,13 @@ const MainContent = ({
                     : 220500 / 128 + 1
                 }
                 offset={specStart}
+                visibleStart={specViewStart}
+                visibleEnd={specViewEnd}
                 playbackCursor={playbackCursor}
                 duration={recordingData.duration}
                 samplerate={recordingData.samplerate}
-                loadData={onLoadData}
-                loadMore={onLoadMore}
+                sampleCount={recordingData.sampleCount}
+                onVisibleWindowChange={onVisibleWindowChange}
               />
             ) : (
               <Box className="emptyPanel">
@@ -276,20 +282,25 @@ const MainContent = ({
                 </Box>
               </Box>
 
-              <Box className="classificationPanel">
-                {classification ? (
-                  <BarChart
-                    id="predictionChart"
-                    values={predictionChartData.values}
-                    categories={predictionChartData.categories}
-                  />
-                ) : (
-                  <Box className="emptyPanel">
-                    <Typography variant="body2" color="text.secondary">
-                      Run classification to see prediction scores.
-                    </Typography>
-                  </Box>
-                )}
+              <Box>
+                <Typography variant="h6">
+                  Classification
+                </Typography>
+                <Box className="classificationPanel">
+                  {classification ? (
+                    <BarChart
+                      id="predictionChart"
+                      values={predictionChartData.values}
+                      categories={predictionChartData.categories}
+                    />
+                  ) : (
+                    <Box className="emptyPanel">
+                      <Typography variant="body2" color="text.secondary">
+                        Run classification to see prediction scores.
+                      </Typography>
+                    </Box>
+                  )}
+                </Box>
               </Box>
             </Box>
           ) : (

@@ -71,6 +71,7 @@ const EMPTY_RECORDING = {
   temperature: 0,
   duration: 0,
   samplerate: 0,
+  sampleCount: 0,
   path: "",
   location: {
     latitude: 0,
@@ -79,6 +80,9 @@ const EMPTY_RECORDING = {
   class: "",
   species: "",
 };
+
+const SPECTROGRAM_PREFETCH_SECONDS = 8;
+const SPECTROGRAM_CACHE_TOLERANCE_FRAMES = 2;
 
 const splitSpeciesText = (value) =>
   value
@@ -179,6 +183,24 @@ export class App extends Component {
 
   projectLoadRetryTimer = null;
 
+  playbackCompletionTimer = null;
+
+  playbackRequestId = 0;
+
+  spectrogramRequestId = 0;
+
+  spectrogramChunkCache = [];
+
+  spectrogramPrefetches = new Set();
+
+  spectrogramPrefetchQueue = [];
+
+  spectrogramPrefetchInFlight = null;
+
+  spectrogramCacheToken = 0;
+
+  visibleSpectrogramWindowRef = { start: 0, end: 0 };
+
   handleDocumentContextMenu = (event) => {
     event.preventDefault();
   };
@@ -226,6 +248,8 @@ export class App extends Component {
       speciesDialog: null,
       specStart: 0,
       specEnd: 0,
+      specViewStart: 0,
+      specViewEnd: 0,
       playPause: false,
       playbackCursor: null,
       expansionRate: 10.0,
@@ -250,6 +274,7 @@ export class App extends Component {
     document.removeEventListener("contextmenu", this.handleDocumentContextMenu);
     window.clearTimeout(this.classifierLoadRetryTimer);
     window.clearTimeout(this.projectLoadRetryTimer);
+    window.clearTimeout(this.playbackCompletionTimer);
   }
 
   openAlert = (title, text) => {
@@ -268,6 +293,286 @@ export class App extends Component {
     this.projectLoadRetryTimer = window.setTimeout(() => {
       this.loadProjects();
     }, 1500);
+  };
+
+  clearSpectrogramCache = () => {
+    this.spectrogramCacheToken += 1;
+    this.spectrogramChunkCache = [];
+    this.spectrogramPrefetches = new Set();
+    this.spectrogramPrefetchQueue = [];
+    this.spectrogramPrefetchInFlight = null;
+  };
+
+  setVisibleSpectrogramWindowRef = (start, end) => {
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      this.visibleSpectrogramWindowRef = { start: 0, end: 0 };
+      return this.visibleSpectrogramWindowRef;
+    }
+
+    const totalFrames = this.getSpectrogramTotalFrames();
+    const boundedTotal = Number.isFinite(totalFrames) && totalFrames > 0
+      ? totalFrames
+      : null;
+    const maxStart = boundedTotal != null ? Math.max(0, boundedTotal - 1) : Number.POSITIVE_INFINITY;
+    const rawStart = Math.floor(start);
+    const rawEnd = Math.ceil(end);
+    const nextStart = Math.min(Math.max(0, rawStart), maxStart);
+    const nextEndRaw = Math.max(nextStart + 1, rawEnd);
+    const nextEnd = boundedTotal != null ? Math.min(nextEndRaw, boundedTotal) : nextEndRaw;
+    this.visibleSpectrogramWindowRef = {
+      start: nextStart,
+      end: nextEnd,
+    };
+    return this.visibleSpectrogramWindowRef;
+  };
+
+  getSpectrogramTotalFrames = () => {
+    const { recordingData, specStart, specData } = this.state;
+    if (
+      Number.isFinite(recordingData.sampleCount) &&
+      recordingData.sampleCount > 0
+    ) {
+      return Math.ceil(recordingData.sampleCount / 128);
+    }
+
+    if (
+      Number.isFinite(recordingData.duration) &&
+      recordingData.duration > 0 &&
+      Number.isFinite(recordingData.samplerate) &&
+      recordingData.samplerate > 0
+    ) {
+      return Math.ceil((recordingData.duration * recordingData.samplerate) / 128);
+    }
+
+    return (specStart || 0) + (specData?.length || 0);
+  };
+
+  getSpectrogramBufferFrames = (requestedSpan = 0) => {
+    const samplerate = this.state.recordingData.samplerate || 220500;
+    const baseFrames = Math.ceil((samplerate * SPECTROGRAM_PREFETCH_SECONDS) / 128);
+    return Math.max(2048, baseFrames, Math.ceil(requestedSpan));
+  };
+
+  normalizeSpectrogramRange = (start, end) => {
+    const safeStart = Number.isFinite(start) ? start : 0;
+    const safeEnd = Number.isFinite(end) ? end : safeStart + 1;
+    const nextStartRaw = Math.max(0, Math.floor(safeStart));
+    const nextEndRaw = Math.max(
+      nextStartRaw + 1,
+      Math.ceil(safeEnd > nextStartRaw ? safeEnd : nextStartRaw + 1)
+    );
+    const totalFrames = this.getSpectrogramTotalFrames();
+    if (Number.isFinite(totalFrames) && totalFrames > 1) {
+      const maxStart = Math.max(0, Math.ceil(totalFrames) - 1);
+      const nextStart = Math.min(nextStartRaw, maxStart);
+      const maxEnd = Math.max(nextStart + 1, Math.ceil(totalFrames));
+      const nextEnd = Math.min(nextEndRaw, maxEnd);
+      return { start: nextStart, end: nextEnd };
+    }
+
+    const nextStart = nextStartRaw;
+    const nextEnd = nextEndRaw;
+    return { start: nextStart, end: nextEnd };
+  };
+
+  runNextSpectrogramPrefetch = () => {
+    if (
+      this.spectrogramPrefetchInFlight !== null ||
+      this.spectrogramPrefetchQueue.length === 0
+    ) {
+      return;
+    }
+
+    const nextTask = this.spectrogramPrefetchQueue.pop();
+    if (!nextTask) {
+      return;
+    }
+
+    this.spectrogramPrefetchInFlight = nextTask.key;
+    backend.get_chunk(
+      nextTask.selectedProject,
+      nextTask.selectedRecording,
+      nextTask.start,
+      nextTask.end
+    )((data) => {
+      this.spectrogramPrefetches.delete(nextTask.key);
+      if (this.spectrogramPrefetchInFlight === nextTask.key) {
+        this.spectrogramPrefetchInFlight = null;
+      }
+      if (
+        nextTask.cacheToken === this.spectrogramCacheToken &&
+        this.state.selectedProject === nextTask.selectedProject &&
+        this.state.selectedRecording === nextTask.selectedRecording &&
+        Array.isArray(data) &&
+        data.length > 0
+      ) {
+        this.storeSpectrogramChunk(nextTask.start, data);
+      }
+      this.runNextSpectrogramPrefetch();
+    }).catch(() => {
+      this.spectrogramPrefetches.delete(nextTask.key);
+      if (this.spectrogramPrefetchInFlight === nextTask.key) {
+        this.spectrogramPrefetchInFlight = null;
+      }
+      this.runNextSpectrogramPrefetch();
+    });
+  };
+
+  storeSpectrogramChunk = (start, data) => {
+    if (!Array.isArray(data) || data.length === 0) {
+      return null;
+    }
+
+    let mergedChunk = {
+      start: Math.max(0, Math.floor(start)),
+      end: Math.max(0, Math.floor(start)) + data.length,
+      data: data.slice(),
+    };
+    const nextCache = [];
+
+    this.spectrogramChunkCache
+      .slice()
+      .sort((left, right) => left.start - right.start)
+      .forEach((chunk) => {
+        if (
+          chunk.end < mergedChunk.start ||
+          chunk.start > mergedChunk.end
+        ) {
+          nextCache.push(chunk);
+          return;
+        }
+
+        const mergedStart = Math.min(chunk.start, mergedChunk.start);
+        const mergedEnd = Math.max(chunk.end, mergedChunk.end);
+        const mergedData = new Array(mergedEnd - mergedStart);
+        const copyIntoMerged = (sourceChunk, overwrite = false) => {
+          const offset = sourceChunk.start - mergedStart;
+          for (let index = 0; index < sourceChunk.data.length; index += 1) {
+            if (overwrite || mergedData[offset + index] === undefined) {
+              mergedData[offset + index] = sourceChunk.data[index];
+            }
+          }
+        };
+
+        copyIntoMerged(chunk);
+        copyIntoMerged(mergedChunk, true);
+        mergedChunk = {
+          start: mergedStart,
+          end: mergedEnd,
+          data: mergedData,
+        };
+      });
+
+    nextCache.push(mergedChunk);
+    this.spectrogramChunkCache = nextCache.sort(
+      (left, right) => left.start - right.start
+    );
+    return mergedChunk;
+  };
+
+  findCachedSpectrogramChunk = (start, end) => {
+    const range = this.normalizeSpectrogramRange(start, end);
+    return (
+      this.spectrogramChunkCache.find(
+        (chunk) =>
+          chunk.start <= range.start + SPECTROGRAM_CACHE_TOLERANCE_FRAMES &&
+          chunk.end >= range.end - SPECTROGRAM_CACHE_TOLERANCE_FRAMES
+      ) || null
+    );
+  };
+
+  applySpectrogramChunkState = (chunk, viewStart, viewEnd) => {
+    if (!chunk) {
+      return false;
+    }
+
+    const nextViewStart = Math.max(chunk.start, Math.floor(viewStart));
+    const nextViewEnd = Math.min(
+      chunk.end,
+      Math.max(nextViewStart + 1, Math.ceil(viewEnd > nextViewStart ? viewEnd : nextViewStart + 1))
+    );
+    const hasVisibleRange =
+      Number.isFinite(this.visibleSpectrogramWindowRef.start) &&
+      Number.isFinite(this.visibleSpectrogramWindowRef.end) &&
+      this.visibleSpectrogramWindowRef.end > this.visibleSpectrogramWindowRef.start;
+    const nextState = {
+      specData: chunk.data,
+      specLoading: false,
+      specStart: chunk.start,
+      specEnd: chunk.end,
+    };
+
+    if (!hasVisibleRange) {
+      this.setVisibleSpectrogramWindowRef(nextViewStart, nextViewEnd);
+      nextState.specViewStart = nextViewStart;
+      nextState.specViewEnd = nextViewEnd;
+    }
+
+    this.setState(nextState);
+    return true;
+  };
+
+  prefetchSpectrogramRange = (start, end) => {
+    const { selectedProject, selectedRecording } = this.state;
+    if (selectedRecording == null) {
+      return;
+    }
+
+    const range = this.normalizeSpectrogramRange(start, end);
+    if (
+      range.end <= range.start ||
+      this.findCachedSpectrogramChunk(range.start, range.end)
+    ) {
+      return;
+    }
+
+    const key = `${range.start}:${range.end}`;
+    if (this.spectrogramPrefetches.has(key)) {
+      return;
+    }
+
+    this.spectrogramPrefetches.add(key);
+    this.spectrogramPrefetchQueue.push({
+      key,
+      start: range.start,
+      end: range.end,
+      selectedProject,
+      selectedRecording,
+      cacheToken: this.spectrogramCacheToken,
+    });
+    if (this.spectrogramPrefetchQueue.length > 6) {
+      const droppedTask = this.spectrogramPrefetchQueue.shift();
+      if (droppedTask) {
+        this.spectrogramPrefetches.delete(droppedTask.key);
+      }
+    }
+    this.runNextSpectrogramPrefetch();
+  };
+
+  prefetchSpectrogramAround = (viewStart, viewEnd) => {
+    const totalFrames = this.getSpectrogramTotalFrames();
+    if (totalFrames <= 1) {
+      return;
+    }
+
+    const range = this.normalizeSpectrogramRange(viewStart, viewEnd);
+    const containingChunk = this.findCachedSpectrogramChunk(range.start, range.end);
+    const span = this.getSpectrogramBufferFrames(range.end - range.start);
+    const leftEdge = containingChunk ? containingChunk.start : range.start;
+    const rightEdge = containingChunk ? containingChunk.end : range.end;
+
+    if (rightEdge < totalFrames) {
+      this.prefetchSpectrogramRange(
+        rightEdge,
+        Math.min(totalFrames, rightEdge + span)
+      );
+    }
+    if (leftEdge > 0) {
+      this.prefetchSpectrogramRange(
+        Math.max(0, leftEdge - span),
+        leftEdge
+      );
+    }
   };
 
   loadClassifiers = () => {
@@ -303,6 +608,9 @@ export class App extends Component {
   };
 
   resetRecordingState = () => {
+    this.spectrogramRequestId += 1;
+    this.clearSpectrogramCache();
+    this.setVisibleSpectrogramWindowRef(0, 0);
     this.setState({
       selectedRecordings: [],
       selectedRecording: null,
@@ -318,14 +626,41 @@ export class App extends Component {
       classifyAllLoading: false,
       recordingLoading: null,
       speciesDialog: null,
+      specStart: 0,
+      specEnd: 0,
+      specViewStart: 0,
+      specViewEnd: 0,
     });
   };
 
   getEffectivePlaybackRange = () => {
-    const { specStart, specEnd, specData } = this.state;
-    const start = specStart || 0;
-    const fallbackEnd = start + (specData ? specData.length : 0);
-    const end = specEnd > start ? specEnd : fallbackEnd;
+    const { specStart, specData, specViewStart, specViewEnd } = this.state;
+    const loadedStart = specStart || 0;
+    const fallbackEnd = loadedStart + (specData ? specData.length : 0);
+    const totalFrames = Math.max(this.getSpectrogramTotalFrames(), 1);
+    const refRange = this.visibleSpectrogramWindowRef;
+    const hasRefRange =
+      Number.isFinite(refRange.start) &&
+      Number.isFinite(refRange.end) &&
+      refRange.end > refRange.start;
+    const visibleStart = hasRefRange
+      ? refRange.start
+      : Number.isFinite(specViewStart)
+        ? specViewStart
+        : loadedStart;
+    const visibleEnd = hasRefRange
+      ? refRange.end
+      : Number.isFinite(specViewEnd) && specViewEnd > visibleStart
+        ? specViewEnd
+        : fallbackEnd;
+    const start = Math.min(
+      Math.max(0, Math.floor(visibleStart)),
+      Math.max(0, totalFrames - 1),
+    );
+    const end = Math.min(
+      Math.max(start + 1, Math.ceil(visibleEnd)),
+      totalFrames,
+    );
     return { start, end };
   };
 
@@ -500,12 +835,16 @@ export class App extends Component {
   };
 
   setRecording = (specData, waveData) => {
+    this.spectrogramRequestId += 1;
+    this.setVisibleSpectrogramWindowRef(0, specData.length);
     this.setState({
       specLoading: false,
       specData,
       waveData,
       specStart: 0,
       specEnd: specData.length,
+      specViewStart: 0,
+      specViewEnd: specData.length,
     });
   };
 
@@ -515,6 +854,8 @@ export class App extends Component {
       return;
     }
 
+    this.spectrogramRequestId += 1;
+    this.setVisibleSpectrogramWindowRef(0, 0);
     this.stopPlayback();
 
     this.setState({
@@ -523,6 +864,8 @@ export class App extends Component {
       waveData: [],
       specStart: 0,
       specEnd: 0,
+      specViewStart: 0,
+      specViewEnd: 0,
       recordingData: recording,
       selectedRecording: recordingIndex,
       classification: recording.classification,
@@ -714,10 +1057,16 @@ export class App extends Component {
   };
 
   playEnd = () => {
+    this.playbackRequestId += 1;
+    window.clearTimeout(this.playbackCompletionTimer);
+    this.playbackCompletionTimer = null;
     this.setState({ playPause: false, playbackCursor: null });
   };
 
   stopPlayback = () => {
+    this.playbackRequestId += 1;
+    window.clearTimeout(this.playbackCompletionTimer);
+    this.playbackCompletionTimer = null;
     if (!this.state.playPause) {
       if (this.state.playbackCursor !== null) {
         this.setState({ playbackCursor: null });
@@ -729,7 +1078,7 @@ export class App extends Component {
     this.setState({ playPause: false, playbackCursor: null });
   };
 
-  playPause = () => {
+  playPause = async () => {
     const {
       playPause,
       selectedProject,
@@ -751,27 +1100,90 @@ export class App extends Component {
     if (end <= start) {
       return;
     }
+    const nextRange = this.setVisibleSpectrogramWindowRef(start, end);
 
     const samplerate = recordingData.samplerate || 220500;
-    const durationMs =
-      (((end - start) * 128) / samplerate) * expansionRate * 1000;
+    const fallbackDurationMs =
+      (((nextRange.end - nextRange.start) * 128) / samplerate) * expansionRate * 1000;
+    const requestId = this.playbackRequestId + 1;
+    this.playbackRequestId = requestId;
 
     this.setState({
       playPause: true,
-      playbackCursor: {
-        startFrameIndex: start,
-        endFrameIndex: end,
-        startedAtMs: performance.now(),
-        durationMs,
-      },
+      playbackCursor: null,
+      specViewStart: nextRange.start,
+      specViewEnd: nextRange.end,
     });
+
+    const loaded = await this.loadChunkRange(nextRange.start, nextRange.end);
+    if (this.playbackRequestId !== requestId || this.state.playPause !== true) {
+      return;
+    }
+    if (!loaded) {
+      this.setState({ playPause: false, playbackCursor: null });
+      return;
+    }
+
     backend.play(
       selectedProject,
       selectedRecording,
-      start,
-      end,
+      nextRange.start,
+      nextRange.end,
       expansionRate
-    );
+    ).then((result) => {
+      if (this.playbackRequestId !== requestId || this.state.playPause !== true) {
+        return;
+      }
+      if (result?.started === false) {
+        this.setState({ playPause: false, playbackCursor: null });
+        return;
+      }
+
+      const durationMs =
+        Number.isFinite(result?.durationMs) && result.durationMs >= 0
+          ? result.durationMs
+          : fallbackDurationMs;
+      const actualStartFrame =
+        Number.isFinite(result?.startFrameIndex)
+          ? result.startFrameIndex
+          : nextRange.start;
+      const actualEndFrameRaw =
+        Number.isFinite(result?.endFrameIndex)
+          ? result.endFrameIndex
+          : nextRange.end;
+      const actualEndFrame = Math.max(actualStartFrame + 1, actualEndFrameRaw);
+      const startupLagMs = result?.playbackEngine === "afplay" ? 120 : 0;
+      const serverStartedAtMs = Number.isFinite(result?.startedAtMs)
+        ? result.startedAtMs
+        : null;
+      const startedAtMs = serverStartedAtMs != null
+        ? performance.now() - Math.max(Date.now() - serverStartedAtMs, 0) + startupLagMs
+        : performance.now() + startupLagMs;
+      this.setState({
+        playbackCursor: {
+          startFrameIndex: actualStartFrame,
+          endFrameIndex: actualEndFrame,
+          startedAtMs,
+          durationMs,
+        },
+      });
+      window.clearTimeout(this.playbackCompletionTimer);
+      this.playbackCompletionTimer = window.setTimeout(() => {
+        if (this.playbackRequestId !== requestId) {
+          return;
+        }
+        this.setState({ playPause: false, playbackCursor: null });
+        this.playbackCompletionTimer = null;
+      }, durationMs + startupLagMs + 50);
+    }).catch((error) => {
+      if (this.playbackRequestId !== requestId) {
+        return;
+      }
+      console.error("Failed to start playback", error);
+      window.clearTimeout(this.playbackCompletionTimer);
+      this.playbackCompletionTimer = null;
+      this.setState({ playPause: false, playbackCursor: null });
+    });
   };
 
   toggleRecordingSelection = (index) => {
@@ -794,31 +1206,93 @@ export class App extends Component {
 
   loadChunkRange = (start, end) => {
     const { selectedProject, selectedRecording } = this.state;
-    this.setState({
-      specLoading: true,
-      specStart: start,
-      specEnd: end,
-    });
+    if (selectedRecording == null) {
+      return Promise.resolve(false);
+    }
 
-    backend.get_chunk(selectedProject, selectedRecording, start, end)((data) => {
-      if (data) {
+    const range = this.normalizeSpectrogramRange(start, end);
+    if (
+      this.state.specStart === range.start &&
+      this.state.specEnd === range.end &&
+      Array.isArray(this.state.specData) &&
+      this.state.specData.length === Math.max(range.end - range.start, 0)
+    ) {
+      return Promise.resolve(true);
+    }
+
+    const requestId = this.spectrogramRequestId + 1;
+    this.spectrogramRequestId = requestId;
+    this.setState((current) => ({
+      specLoading: current.specData.length === 0,
+    }));
+
+    return new Promise((resolve) => {
+      backend.get_chunk(
+        selectedProject,
+        selectedRecording,
+        range.start,
+        range.end
+      )((data) => {
+        if (requestId !== this.spectrogramRequestId) {
+          resolve(false);
+          return;
+        }
+        if (!data) {
+          this.setState((current) => {
+            const fallbackStart = current.specStart || 0;
+            const fallbackEnd = fallbackStart + (current.specData?.length || 0);
+            this.setVisibleSpectrogramWindowRef(fallbackStart, fallbackEnd);
+            return {
+              specLoading: false,
+              specViewStart: fallbackStart,
+              specViewEnd: fallbackEnd,
+            };
+          }, () => resolve(false));
+          return;
+        }
+
         this.setState({
           specData: data,
           specLoading: false,
-        });
-      }
+          specStart: range.start,
+          specEnd: range.start + data.length,
+        }, () => resolve(true));
+      }).catch((error) => {
+        console.error("Failed to load spectrogram chunk", error);
+        if (requestId === this.spectrogramRequestId) {
+          this.setState({ specLoading: false });
+        }
+        resolve(false);
+      });
     });
   };
 
-  loadMoreChunks = (offset) => {
-    const { selectedProject, selectedRecording, specData } = this.state;
-    backend.get_chunk(selectedProject, selectedRecording, offset)((data) => {
-      if (data) {
-        this.setState({ specData: [...specData, ...data] });
-      }
-    });
-  };
+  setVisibleSpectrogramWindow = (start, end) => {
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      return;
+    }
 
+    const nextRange = this.setVisibleSpectrogramWindowRef(start, end);
+    if (this.state.playPause) {
+      this.stopPlayback();
+    }
+
+    this.setState((current) => {
+      if (
+        Math.abs((current.specViewStart ?? 0) - nextRange.start) < 0.5 &&
+        Math.abs((current.specViewEnd ?? 0) - nextRange.end) < 0.5
+      ) {
+        return null;
+      }
+
+      return {
+        specViewStart: nextRange.start,
+        specViewEnd: nextRange.end,
+      };
+    });
+
+    this.loadChunkRange(nextRange.start, nextRange.end);
+  };
   handleClassifierChange = (event) => {
     const value = event.target.value;
     this.setState((current) => {
@@ -977,6 +1451,8 @@ export class App extends Component {
       specData,
       specLoading,
       specStart,
+      specViewEnd,
+      specViewStart,
       specTabValue,
       speciesDialog,
       tabValue,
@@ -989,11 +1465,6 @@ export class App extends Component {
       classifiers
     );
     const isStartupLoading = !projectsLoaded || !classifiersLoaded;
-    const startupMessage = !projectsLoaded && !classifiersLoaded
-      ? "Starting backend"
-      : !classifiersLoaded
-        ? "Preparing classifier models"
-        : "Preparing projects";
 
     if (isStartupLoading) {
       return (
@@ -1001,14 +1472,15 @@ export class App extends Component {
           <CssBaseline />
           <Box className="loadingScreen">
             <Box className="loadingCard">
-              <Box className="loadingBrand">OpenEcho</Box>
+              <Box
+                component="img"
+                src={`${process.env.PUBLIC_URL}/icon-192.png`}
+                alt="OpenEcho"
+                className="loadingIcon"
+              />
               <CircularProgress size={34} thickness={4} />
-              <Typography variant="h6" className="loadingText">
-                {startupMessage}
-              </Typography>
               <Typography variant="body2" className="loadingHint">
-                The desktop app is still warming up. This can take a moment on the
-                first launch.
+                Warming up...
               </Typography>
             </Box>
           </Box>
@@ -1132,9 +1604,10 @@ export class App extends Component {
                 waveData={waveData}
                 recordingData={recordingData}
                 specStart={specStart}
+                specViewStart={specViewStart}
+                specViewEnd={specViewEnd}
                 playbackCursor={playbackCursor}
-                onLoadData={this.loadChunkRange}
-                onLoadMore={this.loadMoreChunks}
+                onVisibleWindowChange={this.setVisibleSpectrogramWindow}
                 playPause={playPause}
                 onPlayPause={this.playPause}
                 expansionRate={expansionRate}

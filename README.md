@@ -14,7 +14,7 @@ It is a desktop app for reviewing, organizing, and classifying long-duration bio
 
 ## 🧱 Stack
 
-- Frontend: React 18, Material UI, LightningChart
+- Frontend: React 18, Material UI, custom WebGL2 charts
 - Backend: FastAPI, Librosa, SoundFile, PyTorch
 - Desktop shell: Tauri 2
 - Packaging: PyInstaller for the Python sidecar

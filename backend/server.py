@@ -84,6 +84,7 @@ classifier_service = ClassifierService()
 playback = None
 playback_token = 0
 playback_lock = threading.Lock()
+play_request_id = 0
 playback_wave_object = None
 playback_process = None
 playback_temp_path = None
@@ -349,6 +350,7 @@ def set_recording_duration(project_index, recording_index, info):
 
     recording["samplerate"] = info.samplerate
     recording["duration"] = info.duration
+    recording["sampleCount"] = int(info.frames)
     save_project_data(projects)
     return dict(recording)
 
@@ -509,23 +511,44 @@ def export_csv_file(project_index, path):
 
 def wait_end(duration, token):
   global playback, playback_token, playback_wave_object, playback_process, playback_temp_path
-  time.sleep(duration)
-  if token != playback_token:
+  target_time = time.time() + max(float(duration), 0.0)
+
+  while True:
+    remaining = target_time - time.time()
+    if remaining > 0:
+      time.sleep(min(remaining, 0.05))
+      continue
+
+    should_wait = False
+    with playback_lock:
+      if token != playback_token:
+        return
+
+      process_running = playback_process is not None and playback_process.poll() is None
+      playback_running = (
+        playback is not None and
+        hasattr(playback, "is_playing") and
+        playback.is_playing()
+      )
+      if process_running or playback_running:
+        should_wait = True
+      else:
+        playback = None
+        playback_wave_object = None
+        playback_process = None
+        if playback_temp_path and os.path.exists(playback_temp_path):
+          try:
+            os.remove(playback_temp_path)
+          except OSError:
+            pass
+        playback_temp_path = None
+
+    if should_wait:
+      time.sleep(0.05)
+      continue
+
+    emit_play_end()
     return
-  if playback_process is not None and playback_process.poll() is None:
-    return
-  if playback is not None and hasattr(playback, "is_playing") and playback.is_playing():
-    return
-  playback = None
-  playback_wave_object = None
-  playback_process = None
-  if playback_temp_path and os.path.exists(playback_temp_path):
-    try:
-      os.remove(playback_temp_path)
-    except OSError:
-      pass
-  playback_temp_path = None
-  emit_play_end()
 
 
 def stop_playback_locked():
@@ -788,27 +811,65 @@ def export_csv(project_index: int, payload: ExportPayload):
 
 @app.post("/api/play")
 def play(payload: PlaybackPayload):
-  global playback, playback_token, playback_wave_object, playback_process, playback_temp_path
+  global playback, playback_token, playback_wave_object, playback_process, playback_temp_path, play_request_id
 
   recording = get_recording_or_404(payload.projectIndex, payload.recordingIndex)
-  with playback_lock:
-    stop_playback_locked()
 
-    waveform, sample_rate, duration = prepare_playback_audio(
-      recording["path"],
-      payload.start,
-      payload.end,
-      payload.expansionRate,
-    )
+  with playback_lock:
+    play_request_id += 1
+    request_id = play_request_id
+
+  (
+    waveform,
+    sample_rate,
+    duration,
+    actual_start_frame,
+    actual_end_frame,
+  ) = prepare_playback_audio(
+    recording["path"],
+    payload.start,
+    payload.end,
+    payload.expansionRate,
+  )
+
+  with playback_lock:
+    if request_id != play_request_id:
+      return {
+        "started": False,
+        "durationMs": 0,
+      }
+
+    stop_playback_locked()
     if len(waveform) == 0:
       playback_token += 1
       emit_play_end()
-      return True
+      return {
+        "started": False,
+        "durationMs": 0,
+      }
 
     playback_token += 1
     token = playback_token
 
-    if platform.system() == "Darwin":
+    playback_engine = "simpleaudio"
+    try:
+      audio_bytes = waveform.tobytes()
+      playback_wave_object = sa.WaveObject(
+        audio_bytes,
+        num_channels=1,
+        bytes_per_sample=2,
+        sample_rate=sample_rate,
+      )
+      playback = playback_wave_object.play()
+      playback_process = None
+      playback_temp_path = None
+    except Exception:
+      if platform.system() != "Darwin":
+        raise
+
+      playback_engine = "afplay"
+      playback = None
+      playback_wave_object = None
       temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
       temp_file.close()
       sf.write(temp_file.name, waveform, sample_rate, subtype="PCM_16")
@@ -818,25 +879,25 @@ def play(payload: PlaybackPayload):
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
       )
-    else:
-      audio_bytes = waveform.tobytes()
-      playback_wave_object = sa.WaveObject(
-        audio_bytes,
-        num_channels=1,
-        bytes_per_sample=2,
-        sample_rate=sample_rate,
-      )
-      playback = playback_wave_object.play()
+    playback_started_at_ms = time.time() * 1000.0
 
   thread = threading.Thread(target=wait_end, args=(duration, token), daemon=True)
   thread.start()
-  return True
+  return {
+    "started": True,
+    "durationMs": duration * 1000.0,
+    "playbackEngine": playback_engine,
+    "startedAtMs": playback_started_at_ms,
+    "startFrameIndex": actual_start_frame,
+    "endFrameIndex": actual_end_frame,
+  }
 
 
 @app.post("/api/pause")
 def pause():
-  global playback_token
+  global playback_token, play_request_id
   with playback_lock:
+    play_request_id += 1
     playback_token += 1
     stop_playback_locked()
   emit_play_end()
