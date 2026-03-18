@@ -1,3 +1,4 @@
+from contextlib import redirect_stdout
 import json
 import sys
 
@@ -15,12 +16,15 @@ def main():
   proclen = float(sys.argv[3]) if len(sys.argv) == 4 else 0
 
   service = BacpipeClassifierService()
-  classification, classes = service.predict_in_process(
-    model_name,
-    recording_path,
-    proclen=proclen,
-  )
-  print(json.dumps({"classification": classification, "classes": classes}))
+  with redirect_stdout(sys.stderr):
+    classification, classes = service.predict_in_process(
+      model_name,
+      recording_path,
+      proclen=proclen,
+    )
+  sys.stdout.write(json.dumps({"classification": classification, "classes": classes}))
+  sys.stdout.write("\n")
+  sys.stdout.flush()
 
 
 if __name__ == "__main__":

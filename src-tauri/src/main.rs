@@ -37,6 +37,25 @@ fn backend_executable_path(app: &tauri::AppHandle) -> tauri::Result<PathBuf> {
   )
 }
 
+#[cfg(not(debug_assertions))]
+fn bundled_tf_worker_path(app: &tauri::AppHandle) -> tauri::Result<PathBuf> {
+  let worker_path = app
+    .path()
+    .resource_dir()?
+    .join("python-backend")
+    .join(".venv-tf");
+
+  #[cfg(target_os = "windows")]
+  {
+    Ok(worker_path.join("Scripts").join("python.exe"))
+  }
+
+  #[cfg(not(target_os = "windows"))]
+  {
+    Ok(worker_path.join("bin").join("python"))
+  }
+}
+
 fn kill_sidecar(app: &tauri::AppHandle) {
   let state = app.state::<SidecarState>();
   let mut child = state.0.lock().unwrap();
@@ -65,12 +84,19 @@ fn main() {
         fs::create_dir_all(&app_data_dir)?;
 
         let backend_path = backend_executable_path(&_app.handle())?;
-        let child = Command::new(&backend_path)
+        let mut command = Command::new(&backend_path);
+        command
           .args(["--host", "127.0.0.1", "--port", "8420"])
           .env("OPENECHO_DATA_DIR", app_data_dir.to_string_lossy().to_string())
           .stdout(Stdio::inherit())
-          .stderr(Stdio::inherit())
-          .spawn()?;
+          .stderr(Stdio::inherit());
+
+        let tf_worker_path = bundled_tf_worker_path(&_app.handle())?;
+        if tf_worker_path.is_file() {
+          command.env("BACPIPE_TF_PYTHON", tf_worker_path.to_string_lossy().to_string());
+        }
+
+        let child = command.spawn()?;
 
         *_app.state::<SidecarState>().0.lock().unwrap() = Some(child);
       }

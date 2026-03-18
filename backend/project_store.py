@@ -273,6 +273,20 @@ def _normalize_labels(labels):
   ]
 
 
+def _normalize_text_list(values):
+  if not isinstance(values, list):
+    return []
+
+  normalized = []
+  for value in values:
+    if value is None:
+      continue
+    text = str(value).strip()
+    if text:
+      normalized.append(text)
+  return normalized
+
+
 def _normalize_classification_summary(classification, fallback_key):
   if not isinstance(classification, dict):
     return None
@@ -282,10 +296,20 @@ def _normalize_classification_summary(classification, fallback_key):
   if not classifier_key and not labels:
     return None
 
-  return {
+  summary = {
     "classifier_key": classifier_key or fallback_key,
     "labels": labels,
   }
+
+  classes = _normalize_text_list(classification.get("classes"))
+  if classes:
+    summary["classes"] = classes
+
+  classes_short = _normalize_text_list(classification.get("classes_short"))
+  if classes_short:
+    summary["classes_short"] = classes_short
+
+  return summary
 
 
 def _normalize_classification(classification, fallback_key):
@@ -427,10 +451,14 @@ def _write_classification_file(classification):
 
   prediction = np.asarray(classification["prediction"], dtype=np.float32)
   labels = np.asarray(classification["labels"], dtype=np.uint32)
+  classes = _normalize_text_list(classification.get("classes"))
+  classes_short = _normalize_text_list(classification.get("classes_short"))
   digest = hashlib.sha256()
   digest.update(classification["classifier_key"].encode("utf-8"))
   digest.update(prediction.tobytes())
   digest.update(labels.tobytes())
+  digest.update("\0".join(classes).encode("utf-8"))
+  digest.update("\0".join(classes_short).encode("utf-8"))
   relative_path = f"{digest.hexdigest()}.npz"
   target_path = CLASSIFICATIONS_PATH / relative_path
   if target_path.is_file():
@@ -451,6 +479,8 @@ def _write_classification_file(classification):
       classifier_key=classification["classifier_key"],
       prediction=prediction,
       labels=labels,
+      classes=np.asarray(classes, dtype=np.str_),
+      classes_short=np.asarray(classes_short, dtype=np.str_),
     )
     os.replace(temp_path, target_path)
   finally:
@@ -475,12 +505,25 @@ def _load_classification_file(relative_path, fallback_key, fallback_labels):
     classifier_key = str(payload["classifier_key"].tolist() or fallback_key)
     prediction = payload["prediction"].astype(np.float32, copy=False).tolist()
     labels = payload["labels"].astype(np.uint32, copy=False).tolist()
+    classes = payload["classes"].astype(np.str_, copy=False).tolist() if "classes" in payload.files else []
+    classes_short = (
+      payload["classes_short"].astype(np.str_, copy=False).tolist()
+      if "classes_short" in payload.files
+      else []
+    )
 
-  return {
+  classification = {
     "classifier_key": classifier_key,
     "prediction": [float(value) for value in prediction],
     "labels": [int(value) for value in labels],
   }
+
+  if classes:
+    classification["classes"] = [str(value) for value in classes]
+  if classes_short:
+    classification["classes_short"] = [str(value) for value in classes_short]
+
+  return classification
 
 
 def _legacy_classification_from_row(row):

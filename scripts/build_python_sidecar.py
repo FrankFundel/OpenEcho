@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import shutil
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,12 +26,11 @@ EXCLUDED_MODULES = [
   "tensorflow",
   "tensorflow_estimator",
   "tensorflow_io_gcs_filesystem",
-  "timm",
-  "torchvision",
-  "transformers",
   "yt_dlp",
   "zmq",
 ]
+TF_WORKER_DIR = ROOT / ".venv-tf"
+BACKEND_SOURCE_DIR = ROOT / "backend"
 
 
 def data_arg(path, destination):
@@ -43,6 +43,50 @@ def add_data_if_exists(pyinstaller_args, path, destination):
   if not path.exists():
     return
   pyinstaller_args.extend(["--add-data", data_arg(path, destination)])
+
+
+def copy_tf_worker_if_present(backend_dir):
+  if not TF_WORKER_DIR.exists():
+    print(f"TensorFlow worker not found at {TF_WORKER_DIR}; bundled app will use the reduced backend.")
+    return
+
+  target_dir = backend_dir / ".venv-tf"
+  if target_dir.exists():
+    shutil.rmtree(target_dir)
+
+  shutil.copytree(
+    TF_WORKER_DIR,
+    target_dir,
+    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+  )
+
+  if os.name == "nt":
+    worker_python = target_dir / "Scripts" / "python.exe"
+  else:
+    worker_python = target_dir / "bin" / "python"
+
+  if worker_python.is_file() and os.name != "nt":
+    worker_python.chmod(0o755)
+
+  print(f"Bundled TensorFlow worker: {worker_python}")
+
+
+def copy_worker_source_if_present(backend_dir):
+  if not BACKEND_SOURCE_DIR.is_dir():
+    return
+
+  target_root = backend_dir / "worker-src"
+  target_dir = target_root / "backend"
+  if target_root.exists():
+    shutil.rmtree(target_root)
+
+  shutil.copytree(
+    BACKEND_SOURCE_DIR,
+    target_dir,
+    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+  )
+
+  print(f"Bundled TensorFlow worker source: {target_root}")
 
 
 def executable_name():
@@ -96,6 +140,9 @@ def build_binary():
   backend_executable = backend_dir / executable_name()
   if os.name != "nt" and backend_executable.is_file():
     backend_executable.chmod(0o755)
+
+  copy_tf_worker_if_present(backend_dir)
+  copy_worker_source_if_present(backend_dir)
 
   print(f"Built backend bundle: {backend_dir}")
   print(f"Backend executable: {backend_executable}")

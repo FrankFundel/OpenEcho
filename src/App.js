@@ -95,8 +95,36 @@ const splitSpeciesText = (value) =>
 const findClassifierByKey = (classifiers, classifierKey) =>
   classifiers.find((item) => item.key === classifierKey) || null;
 
-const resolveClassificationMetadata = (classification, classifiers) => {
+const resolveMetadataArray = (classificationValue, classifierValue) => {
+  if (Array.isArray(classificationValue) && classificationValue.length > 0) {
+    return classificationValue;
+  }
+  if (Array.isArray(classifierValue)) {
+    return classifierValue;
+  }
+  return [];
+};
+
+const classificationMatchesClassifier = (classification, classifierKey) => {
+  if (!classification) {
+    return false;
+  }
+
+  const resolvedClassifierKey =
+    typeof classification.classifier_key === "string"
+      ? classification.classifier_key
+      : "";
+
+  return !classifierKey || !resolvedClassifierKey || resolvedClassifierKey === classifierKey;
+};
+
+const resolveClassificationMetadata = (
+  classification,
+  classifiers,
+  classifierKey
+) => {
   if (
+    !classificationMatchesClassifier(classification, classifierKey) ||
     !classification ||
     (
       !Array.isArray(classification.prediction) &&
@@ -121,8 +149,14 @@ const resolveClassificationMetadata = (classification, classifiers) => {
 
   return {
     ...classification,
-    classes: classifierConfig.classes || [],
-    classes_short: classifierConfig.classes_short || [],
+    classes: resolveMetadataArray(
+      classification.classes,
+      classifierConfig.classes
+    ),
+    classes_short: resolveMetadataArray(
+      classification.classes_short,
+      classifierConfig.classes_short
+    ),
   };
 };
 
@@ -999,6 +1033,7 @@ export class App extends Component {
         recordingData: {
           ...this.state.recordingData,
           species: classes.join(", "),
+          classification: nextClassification,
         },
         classification: nextClassification,
         classifyLoading: false,
@@ -1306,6 +1341,7 @@ export class App extends Component {
 
       return {
         classifier: value,
+        classification: null,
         projects,
       };
     });
@@ -1462,7 +1498,8 @@ export class App extends Component {
     } = this.state;
     const resolvedClassification = resolveClassificationMetadata(
       classification,
-      classifiers
+      classifiers,
+      classifier
     );
     const isStartupLoading = !projectsLoaded || !classifiersLoaded;
 
@@ -1531,7 +1568,8 @@ export class App extends Component {
     const speciesDialogClassification = speciesDialogRecording
       ? resolveClassificationMetadata(
           speciesDialogRecording.classification,
-          classifiers
+          classifiers,
+          classifier
         )
       : resolvedClassification;
     const speciesDialogOptions = speciesDialog

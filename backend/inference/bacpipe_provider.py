@@ -30,7 +30,10 @@ CLASSIFIER_MODEL_NAMES = {
   "surfperch",
   "bat2",
 }
-MULTILABEL_MODEL_NAMES = set(CLASSIFIER_MODEL_NAMES)
+MULTILABEL_MODEL_NAMES = {
+  "bat",
+  "bat2",
+}
 TENSORFLOW_MODEL_NAMES = {
   "birdnet",
   "google_whale",
@@ -70,10 +73,45 @@ MODEL_ORDER_PRIORITY = {
 MULTILABEL_THRESHOLD = 0.5
 REPO_ROOT = resource_root()
 DEFAULT_TF_VENV_PYTHON = REPO_ROOT / ".venv-tf" / "bin" / "python"
+PYTHON_ENV_VARS_TO_CLEAR = {
+  "PYTHONHOME",
+  "PYTHONPATH",
+  "PYTHONEXECUTABLE",
+  "__PYVENV_LAUNCHER__",
+  "_MEIPASS2",
+  "_PYI_APPLICATION_HOME_DIR",
+  "_PYI_ARCHIVE_FILE",
+  "_PYI_PARENT_PROCESS_LEVEL",
+  "_PYI_SPLASH_IPC",
+  "PYI_SAFE_PATH",
+}
 
 
 def classifier_key(model_name):
   return f"bacpipe:{model_name}"
+
+
+def parse_worker_payload(stdout):
+  text = (stdout or "").strip()
+  if not text:
+    raise RuntimeError("Bacpipe worker returned no JSON output.")
+
+  candidates = [text]
+  candidates.extend(
+    line.strip()
+    for line in text.splitlines()
+    if line.strip()
+  )
+
+  for candidate in reversed(candidates):
+    try:
+      payload = json.loads(candidate)
+    except json.JSONDecodeError:
+      continue
+    if isinstance(payload, dict) and "classification" in payload and "classes" in payload:
+      return payload
+
+  raise RuntimeError("Bacpipe worker returned invalid JSON.")
 
 
 @lru_cache(maxsize=1)
@@ -93,6 +131,12 @@ def display_name(model_name):
   if model_name in DISPLAY_NAME_OVERRIDES:
     return DISPLAY_NAME_OVERRIDES[model_name]
   return " ".join(part.capitalize() for part in model_name.split("_"))
+
+
+def provider_label(model_name):
+  if model_name == "bat2":
+    return None
+  return "bacpipe"
 
 
 def make_short_label(label):
@@ -137,6 +181,45 @@ def resolve_tf_python():
   return None
 
 
+def resolve_worker_source_root(python_path=None):
+  override = os.environ.get("BACPIPE_WORKER_SOURCE_ROOT")
+  if override:
+    override_path = Path(override).expanduser().resolve()
+    if (override_path / "backend" / "inference" / "bacpipe_worker.py").is_file():
+      return override_path
+
+  if python_path:
+    python_path = Path(python_path).expanduser()
+    if not python_path.is_absolute():
+      python_path = Path(os.path.abspath(str(python_path)))
+    bundle_root = python_path.parents[2]
+    worker_source_root = bundle_root / "worker-src"
+    if (worker_source_root / "backend" / "inference" / "bacpipe_worker.py").is_file():
+      return worker_source_root
+
+  if (REPO_ROOT / "backend" / "inference" / "bacpipe_worker.py").is_file():
+    return REPO_ROOT
+
+  return None
+
+
+def worker_subprocess_env(python_path):
+  env = dict(os.environ)
+  for key in PYTHON_ENV_VARS_TO_CLEAR:
+    env.pop(key, None)
+
+  worker_source_root = resolve_worker_source_root(python_path)
+  if worker_source_root is not None:
+    env["PYTHONPATH"] = str(worker_source_root)
+
+  return env
+
+
+def worker_subprocess_cwd(python_path):
+  worker_source_root = resolve_worker_source_root(python_path)
+  return str(worker_source_root or REPO_ROOT)
+
+
 @lru_cache(maxsize=None)
 def worker_runtime_status(python_path):
   try:
@@ -148,9 +231,10 @@ def worker_runtime_status(python_path):
       ],
       capture_output=True,
       text=True,
-      timeout=12,
+      timeout=60,
       check=False,
-      cwd=REPO_ROOT,
+      cwd=worker_subprocess_cwd(python_path),
+      env=worker_subprocess_env(python_path),
     )
   except subprocess.TimeoutExpired:
     return False, "Dedicated TensorFlow environment timed out while importing TensorFlow."
@@ -170,6 +254,13 @@ def prime_bacpipe_non_tf_compat():
   tensorflow_ready, _ = tensorflow_runtime_status()
   if tensorflow_ready or "bacpipe.embedding_generation_pipelines.utils" in sys.modules:
     return
+
+  # Force torch-only transformer code paths in the main process when the local
+  # TensorFlow runtime is broken. TensorFlow-backed models already run through
+  # a dedicated worker environment.
+  os.environ.setdefault("USE_TF", "0")
+  os.environ.setdefault("USE_TORCH", "1")
+  os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
 
   tensorflow_stub = types.ModuleType("tensorflow")
   tensorflow_stub.__spec__ = importlib.machinery.ModuleSpec("tensorflow", loader=None)
@@ -196,12 +287,17 @@ def prime_bacpipe_non_tf_compat():
 
 def get_bacpipe_model_names(classifier_only=True):
   bacpipe = load_bacpipe()
-  model_names = []
+  model_names = set()
 
   if bacpipe is not None:
-    model_names = list(bacpipe.supported_models)
     if classifier_only:
-      model_names = [name for name in model_names if name in CLASSIFIER_MODEL_NAMES]
+      # `bacpipe.supported_models` can hide TensorFlow-backed classifiers when the
+      # current Python runtime does not import TensorFlow, even if we can run
+      # them through a dedicated worker environment.
+      model_names.update(CLASSIFIER_MODEL_NAMES)
+      model_names.discard("bat2")
+    else:
+      model_names.update(bacpipe.supported_models)
 
   try:
     from backend.inference.bacpipe_bat_adapter import BAT2_CHECKPOINT_PATH
@@ -209,10 +305,10 @@ def get_bacpipe_model_names(classifier_only=True):
     BAT2_CHECKPOINT_PATH = None
 
   if BAT2_CHECKPOINT_PATH and BAT2_CHECKPOINT_PATH.is_file():
-    model_names.append("bat2")
+    model_names.add("bat2")
 
   return sorted(
-    dict.fromkeys(model_names),
+    model_names,
     key=lambda model_name: (
       MODEL_ORDER_PRIORITY.get(model_name, 100),
       display_name(model_name),
@@ -234,6 +330,9 @@ def model_runtime_available(model_name):
     return False
 
   if model_name in TENSORFLOW_MODEL_NAMES:
+    worker_python = resolve_tf_python()
+    if worker_python and worker_python.is_file():
+      return True
     try:
       resolve_runtime(model_name)
     except RuntimeError:
@@ -265,7 +364,7 @@ def get_bacpipe_classifiers():
         "key": classifier_key(model_name),
         "name": display_name(model_name),
         "provider": "bacpipe",
-        "provider_label": "bacpipe",
+        "provider_label": provider_label(model_name),
         "model_name": model_name,
         "classes": classes,
         "classes_short": classes_short,
@@ -434,6 +533,9 @@ class BacpipeClassifierService:
     return classification, predicted_classes
 
   def get_embedder(self, model_name):
+    if model_name not in TENSORFLOW_MODEL_NAMES:
+      prime_bacpipe_non_tf_compat()
+
     bacpipe = load_bacpipe()
     if bacpipe is None:
       raise RuntimeError("bacpipe is not installed.")
@@ -441,8 +543,6 @@ class BacpipeClassifierService:
     resolve_runtime(model_name)
 
     if model_name not in self.embedders:
-      if model_name not in TENSORFLOW_MODEL_NAMES:
-        prime_bacpipe_non_tf_compat()
       bacpipe.settings.run_pretrained_classifier = True
       bacpipe.settings.device = "cpu"
       bacpipe.ensure_models_exist(bacpipe.settings.model_base_path, [model_name])
@@ -489,7 +589,8 @@ class BacpipeClassifierService:
       ],
       capture_output=True,
       text=True,
-      cwd=REPO_ROOT,
+      cwd=worker_subprocess_cwd(python_path),
+      env=worker_subprocess_env(python_path),
       check=False,
     )
     if completed.returncode != 0:
@@ -497,9 +598,5 @@ class BacpipeClassifierService:
       stdout = completed.stdout.strip()
       raise RuntimeError(stderr or stdout or "Bacpipe worker process failed.")
 
-    try:
-      payload = json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
-      raise RuntimeError("Bacpipe worker returned invalid JSON.") from error
-
+    payload = parse_worker_payload(completed.stdout)
     return payload["classification"], payload["classes"]

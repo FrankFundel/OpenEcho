@@ -197,7 +197,7 @@ def compact_classification_payload(classification):
   if not isinstance(prediction, list):
     return {}
 
-  return {
+  compact = {
     "prediction": list(prediction),
     "labels": [
       int(label)
@@ -206,6 +206,18 @@ def compact_classification_payload(classification):
     ],
     "classifier_key": classification.get("classifier_key") or DEFAULT_CLASSIFIER_KEY,
   }
+
+  for field_name in ("classes", "classes_short"):
+    values = classification.get(field_name)
+    if not isinstance(values, list):
+      continue
+    compact[field_name] = [
+      str(value)
+      for value in values
+      if value is not None and str(value).strip()
+    ]
+
+  return compact
 
 
 def normalize_project_classifiers():
