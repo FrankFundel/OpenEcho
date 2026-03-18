@@ -87,6 +87,7 @@ fn main() {
         let mut command = Command::new(&backend_path);
         command
           .args(["--host", "127.0.0.1", "--port", "8420"])
+          .current_dir(&app_data_dir)
           .env("OPENECHO_DATA_DIR", app_data_dir.to_string_lossy().to_string())
           .stdout(Stdio::inherit())
           .stderr(Stdio::inherit());

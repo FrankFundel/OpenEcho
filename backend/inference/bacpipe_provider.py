@@ -16,7 +16,7 @@ import types
 import numpy as np
 import soundfile as sf
 
-from backend.paths import resource_root
+from backend.paths import data_path, resource_root
 
 
 CLASSIFIER_MODEL_NAMES = {
@@ -30,6 +30,7 @@ CLASSIFIER_MODEL_NAMES = {
   "surfperch",
   "bat2",
 }
+BUNDLED_WORKER_MODEL_NAMES = CLASSIFIER_MODEL_NAMES - {"bat2"}
 MULTILABEL_MODEL_NAMES = {
   "bat",
   "bat2",
@@ -73,6 +74,7 @@ MODEL_ORDER_PRIORITY = {
 MULTILABEL_THRESHOLD = 0.5
 REPO_ROOT = resource_root()
 DEFAULT_TF_VENV_PYTHON = REPO_ROOT / ".venv-tf" / "bin" / "python"
+WORKER_PROCESS_ENV_VAR = "OPENECHO_BACPIPE_WORKER"
 PYTHON_ENV_VARS_TO_CLEAR = {
   "PYTHONHOME",
   "PYTHONPATH",
@@ -89,6 +91,22 @@ PYTHON_ENV_VARS_TO_CLEAR = {
 
 def classifier_key(model_name):
   return f"bacpipe:{model_name}"
+
+
+def running_in_frozen_bundle():
+  return bool(getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None))
+
+
+def in_bacpipe_worker_process():
+  return os.environ.get(WORKER_PROCESS_ENV_VAR) == "1"
+
+
+def prefer_worker_runtime(model_name):
+  return (
+    running_in_frozen_bundle() and
+    not in_bacpipe_worker_process() and
+    model_name in BUNDLED_WORKER_MODEL_NAMES
+  )
 
 
 def parse_worker_payload(stdout):
@@ -114,6 +132,24 @@ def parse_worker_payload(stdout):
   raise RuntimeError("Bacpipe worker returned invalid JSON.")
 
 
+def configure_bacpipe_storage(bacpipe):
+  storage_root = data_path("bacpipe")
+  storage_root.mkdir(parents=True, exist_ok=True)
+
+  for setting_name in (
+    "model_base_path",
+    "embed_parent_dir",
+    "dim_reduc_parent_dir",
+    "evaluations_dir",
+    "main_results_dir",
+  ):
+    current_value = getattr(bacpipe.settings, setting_name, None)
+    leaf_name = Path(str(current_value)).name if current_value else setting_name
+    target_path = storage_root / leaf_name
+    target_path.mkdir(parents=True, exist_ok=True)
+    setattr(bacpipe.settings, setting_name, str(target_path))
+
+
 @lru_cache(maxsize=1)
 def load_bacpipe():
   if os.environ.get("OPENECHO_DISABLE_BACPIPE") == "1":
@@ -124,7 +160,9 @@ def load_bacpipe():
   except ImportError:  # pragma: no cover - optional dependency
     return None
 
+  configure_bacpipe_storage(bacpipe)
   return bacpipe
+
 
 
 def display_name(model_name):
@@ -208,6 +246,10 @@ def worker_subprocess_env(python_path):
   for key in PYTHON_ENV_VARS_TO_CLEAR:
     env.pop(key, None)
 
+  env[WORKER_PROCESS_ENV_VAR] = "1"
+  env.setdefault("OPENECHO_DATA_DIR", str(data_path()))
+  env.setdefault("OPENECHO_RESOURCE_DIR", str(REPO_ROOT))
+
   worker_source_root = resolve_worker_source_root(python_path)
   if worker_source_root is not None:
     env["PYTHONPATH"] = str(worker_source_root)
@@ -216,8 +258,7 @@ def worker_subprocess_env(python_path):
 
 
 def worker_subprocess_cwd(python_path):
-  worker_source_root = resolve_worker_source_root(python_path)
-  return str(worker_source_root or REPO_ROOT)
+  return str(data_path())
 
 
 @lru_cache(maxsize=None)
@@ -286,18 +327,22 @@ def prime_bacpipe_non_tf_compat():
 
 
 def get_bacpipe_model_names(classifier_only=True):
-  bacpipe = load_bacpipe()
   model_names = set()
 
-  if bacpipe is not None:
-    if classifier_only:
-      # `bacpipe.supported_models` can hide TensorFlow-backed classifiers when the
-      # current Python runtime does not import TensorFlow, even if we can run
-      # them through a dedicated worker environment.
-      model_names.update(CLASSIFIER_MODEL_NAMES)
-      model_names.discard("bat2")
-    else:
-      model_names.update(bacpipe.supported_models)
+  if running_in_frozen_bundle() and not in_bacpipe_worker_process():
+    model_names.update(CLASSIFIER_MODEL_NAMES)
+    model_names.discard("bat2")
+  else:
+    bacpipe = load_bacpipe()
+    if bacpipe is not None:
+      if classifier_only:
+        # `bacpipe.supported_models` can hide TensorFlow-backed classifiers when the
+        # current Python runtime does not import TensorFlow, even if we can run
+        # them through a dedicated worker environment.
+        model_names.update(CLASSIFIER_MODEL_NAMES)
+        model_names.discard("bat2")
+      else:
+        model_names.update(bacpipe.supported_models)
 
   try:
     from backend.inference.bacpipe_bat_adapter import BAT2_CHECKPOINT_PATH
@@ -326,17 +371,20 @@ def model_runtime_available(model_name):
       return False
     return bool(BAT2_CHECKPOINT_PATH and BAT2_CHECKPOINT_PATH.is_file())
 
-  if load_bacpipe() is None:
-    return False
-
-  if model_name in TENSORFLOW_MODEL_NAMES:
-    worker_python = resolve_tf_python()
-    if worker_python and worker_python.is_file():
-      return True
+  if prefer_worker_runtime(model_name):
     try:
       resolve_runtime(model_name)
     except RuntimeError:
       return False
+    return True
+
+  if load_bacpipe() is None:
+    return False
+
+  try:
+    resolve_runtime(model_name)
+  except RuntimeError:
+    return False
 
   return True
 
@@ -374,6 +422,28 @@ def get_bacpipe_classifiers():
 
 
 def resolve_runtime(model_name):
+  if in_bacpipe_worker_process():
+    return "in_process", None
+
+  if prefer_worker_runtime(model_name):
+    worker_python = resolve_tf_python()
+    worker_status = None
+    if worker_python:
+      worker_ready, worker_status = worker_runtime_status(str(worker_python))
+      if worker_ready:
+        return "worker", worker_python
+
+    model_display_name = display_name(model_name)
+    if worker_python:
+      raise RuntimeError(
+        f"{model_display_name} is unavailable in the bundled app because the dedicated bacpipe worker at {worker_python} is not ready: {worker_status}"
+      )
+
+    raise RuntimeError(
+      f"{model_display_name} is unavailable in the bundled app because the dedicated bacpipe worker was not found. "
+      f"Expected {DEFAULT_TF_VENV_PYTHON} or set BACPIPE_TF_PYTHON."
+    )
+
   if model_name not in TENSORFLOW_MODEL_NAMES:
     return "in_process", None
 

@@ -12,6 +12,26 @@ from torch import nn
 from backend.paths import resource_root
 
 BAT2_CHECKPOINT_PATH = resource_root() / "models" / "BigBAT.pth"
+BAT_CLASS_LABELS = [
+  "Rhinolophus ferrumequinum",
+  "Rhinolophus hipposideros",
+  "Myotis daubentonii",
+  "Myotis brandtii",
+  "Myotis mystacinus",
+  "Myotis emarginatus",
+  "Myotis nattereri",
+  "Myotis myotis",
+  "Myotis dasycneme",
+  "Nyctalus noctula",
+  "Nyctalus leisleri",
+  "Pipistrellus pipistrellus",
+  "Pipistrellus nathusii",
+  "Pipistrellus kuhlii",
+  "Eptesicus serotinus",
+  "Eptesicus nilssonii",
+  "Miniopterus schreibersii",
+  "Vespertilio murinus",
+]
 BAT_CLASS_SHORT_LABELS = [
   "Rfer",
   "Rhip",
@@ -42,9 +62,7 @@ BAT2_FILTER_B, BAT2_FILTER_A = signal.butter(
 
 @lru_cache(maxsize=1)
 def get_bat_class_labels():
-  from bacpipe.model_specific_utils.bat.prepare_data import germanBats
-
-  return list(germanBats)
+  return list(BAT_CLASS_LABELS)
 
 
 def get_bat_class_short_labels():
