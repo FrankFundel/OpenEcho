@@ -237,6 +237,14 @@ def compact_classification_payload(classification):
       if value is not None and str(value).strip()
     ]
 
+  boxes = classification.get("boxes")
+  if isinstance(boxes, list):
+    compact["boxes"] = [
+      dict(box)
+      for box in boxes
+      if isinstance(box, dict)
+    ]
+
   return compact
 
 
@@ -849,6 +857,24 @@ def get_classifiers():
   load_classifiers()
   with state_lock:
     return list(classifiers)
+
+
+@app.get("/api/classifiers/classes")
+def get_classifier_classes(classifierKey: str):
+  with state_lock:
+    classifier_config = find_classifier(classifierKey)
+  if classifier_config is None:
+    raise HTTPException(status_code=404, detail=f"Unknown classifier: {classifierKey}")
+
+  try:
+    class_metadata = classifier_service.get_classes(classifier_config)
+  except Exception as error:
+    raise HTTPException(status_code=500, detail=str(error)) from error
+
+  with state_lock:
+    classifier_config["classes"] = class_metadata["classes"]
+    classifier_config["classes_short"] = class_metadata["classes_short"]
+  return class_metadata
 
 
 @app.get("/api/projects")

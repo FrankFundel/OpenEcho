@@ -5,6 +5,9 @@ const PANEL_FILL = "rgba(255, 255, 255, 0.03)";
 const LABEL_COLOR = "rgba(255, 255, 255, 0.78)";
 const MUTED_LABEL_COLOR = "rgba(255, 255, 255, 0.54)";
 const PLAYHEAD_COLOR = "rgba(255, 255, 255, 0.82)";
+const BOX_STROKE_COLOR = "rgba(102, 192, 183, 0.95)";
+const BOX_FILL_COLOR = "rgba(102, 192, 183, 0.12)";
+const BOX_LABEL_FILL = "rgba(10, 11, 15, 0.82)";
 const MIN_VIEW_FRAMES = 64;
 const MIN_VIEW_ROWS = 12;
 const SPECTRUM_DOMAIN_MAX = 900;
@@ -486,6 +489,78 @@ const drawLabel = (ctx, text, x, y, options = {}) => {
   ctx.restore();
 };
 
+const drawBoundingBoxes = ({
+  ctx,
+  boxes,
+  rect,
+  view,
+  secondsToFrame,
+  frequencyToRow,
+}) => {
+  if (!Array.isArray(boxes) || boxes.length === 0) {
+    return;
+  }
+
+  const xSpan = Math.max(view.end - view.start, 1);
+  const ySpan = Math.max(view.rowEnd - view.rowStart, 1);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(rect.x, rect.y, rect.width, rect.height);
+  ctx.clip();
+  ctx.lineWidth = 1.5;
+  ctx.font = "11px sans-serif";
+
+  boxes.forEach((box) => {
+    const startFrame = secondsToFrame(Number(box.start));
+    const endFrame = secondsToFrame(Number(box.end));
+    const lowRow = frequencyToRow(Number(box.low_freq));
+    const highRow = frequencyToRow(Number(box.high_freq));
+
+    if (
+      !Number.isFinite(startFrame) ||
+      !Number.isFinite(endFrame) ||
+      !Number.isFinite(lowRow) ||
+      !Number.isFinite(highRow) ||
+      endFrame < view.start ||
+      startFrame > view.end ||
+      highRow < view.rowStart ||
+      lowRow > view.rowEnd
+    ) {
+      return;
+    }
+
+    const x1 =
+      rect.x + ((startFrame - view.start) / xSpan) * rect.width;
+    const x2 =
+      rect.x + ((endFrame - view.start) / xSpan) * rect.width;
+    const yHigh =
+      rect.y + rect.height - ((highRow - view.rowStart) / ySpan) * rect.height;
+    const yLow =
+      rect.y + rect.height - ((lowRow - view.rowStart) / ySpan) * rect.height;
+    const x = clamp(Math.min(x1, x2), rect.x, rect.x + rect.width);
+    const y = clamp(Math.min(yHigh, yLow), rect.y, rect.y + rect.height);
+    const width = clamp(Math.abs(x2 - x1), 1, rect.x + rect.width - x);
+    const height = clamp(Math.abs(yLow - yHigh), 1, rect.y + rect.height - y);
+
+    ctx.fillStyle = BOX_FILL_COLOR;
+    ctx.strokeStyle = BOX_STROKE_COLOR;
+    ctx.fillRect(x, y, width, height);
+    ctx.strokeRect(x + 0.75, y + 0.75, Math.max(width - 1.5, 0), Math.max(height - 1.5, 0));
+
+    const label = box.label ? String(box.label) : "";
+    if (label && width >= 24 && height >= 10) {
+      const labelWidth = Math.min(ctx.measureText(label).width + 8, width);
+      ctx.fillStyle = BOX_LABEL_FILL;
+      ctx.fillRect(x, Math.max(rect.y, y - 16), labelWidth, 15);
+      ctx.fillStyle = LABEL_COLOR;
+      ctx.fillText(label, x + 4, Math.max(rect.y + 11, y - 5));
+    }
+  });
+
+  ctx.restore();
+};
+
 const Spectrogram = ({
   data,
   waveData,
@@ -500,6 +575,8 @@ const Spectrogram = ({
   onVisibleWindowChange,
   maxF,
   maxS,
+  boxes = [],
+  showBoxes = false,
 }) => {
   const initialRowEnd = Math.max((data[0]?.length || 1) - 1, 1);
   const containerRef = useRef(null);
@@ -547,6 +624,8 @@ const Spectrogram = ({
     playbackCursor,
     maxF,
     maxS,
+    boxes,
+    showBoxes,
   });
   const [webglError, setWebglError] = useState("");
   const cursorRef = useRef("");
@@ -563,6 +642,8 @@ const Spectrogram = ({
     playbackCursor,
     maxF,
     maxS,
+    boxes,
+    showBoxes,
   };
 
   const getTotalFrames = () => {
@@ -597,6 +678,23 @@ const Spectrogram = ({
   const rowToFrequency = (rowIndex) => {
     const current = propsRef.current;
     return current.maxF > 0 ? rowIndex / current.maxF : rowIndex;
+  };
+
+  const secondsToFrame = (seconds) => {
+    const current = propsRef.current;
+    if (
+      Number.isFinite(seconds) &&
+      Number.isFinite(current.samplerate) &&
+      current.samplerate > 0
+    ) {
+      return (seconds * current.samplerate) / 128;
+    }
+    return seconds * Math.max(current.maxS || 1, 1);
+  };
+
+  const frequencyToRow = (frequency) => {
+    const current = propsRef.current;
+    return frequency * Math.max(current.maxF || 1, 1);
   };
 
   const getMaxWaveformWindowFrames = () => {
@@ -1206,6 +1304,17 @@ const Spectrogram = ({
         layout.waveform.height - 1.5,
       );
 
+      if (current.showBoxes) {
+        drawBoundingBoxes({
+          ctx,
+          boxes: current.boxes,
+          rect: layout.spectrogram,
+          view,
+          secondsToFrame,
+          frequencyToRow,
+        });
+      }
+
       let playheadFrame = null;
       if (
         current.playbackCursor &&
@@ -1463,6 +1572,10 @@ const Spectrogram = ({
     scheduleDrawRef.current?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleStart, visibleEnd]);
+
+  useEffect(() => {
+    scheduleDrawRef.current?.();
+  }, [boxes, showBoxes]);
 
   // Rebuild the WebGL texture while preserving the canonical x-window.
   useEffect(() => {

@@ -350,6 +350,44 @@ def _normalize_text_list(values):
   return normalized
 
 
+def _normalize_boxes(value):
+  if not isinstance(value, list):
+    return []
+
+  normalized = []
+  for item in value:
+    if not isinstance(item, dict):
+      continue
+
+    box = {}
+    for key in ("start", "end", "low_freq", "high_freq", "score", "class_score"):
+      raw_value = item.get(key)
+      if raw_value is None:
+        continue
+      try:
+        number = float(raw_value)
+      except (TypeError, ValueError):
+        continue
+      if math.isfinite(number):
+        box[key] = number
+
+    raw_class_index = item.get("class_index")
+    if raw_class_index is not None:
+      try:
+        box["class_index"] = int(raw_class_index)
+      except (TypeError, ValueError):
+        pass
+
+    label = item.get("label")
+    if label is not None and str(label).strip():
+      box["label"] = str(label).strip()
+
+    if all(key in box for key in ("start", "end", "low_freq", "high_freq")):
+      normalized.append(box)
+
+  return normalized
+
+
 def _normalize_classification_summary(classification, fallback_key):
   if not isinstance(classification, dict):
     return None
@@ -392,6 +430,9 @@ def _normalize_classification(classification, fallback_key):
     normalized_prediction.append(rounded)
 
   summary["prediction"] = normalized_prediction
+  boxes = _normalize_boxes(classification.get("boxes"))
+  if boxes:
+    summary["boxes"] = boxes
   return summary
 
 
@@ -423,6 +464,7 @@ def _merge_classification_entries(existing, incoming):
     "prediction",
     "classes",
     "classes_short",
+    "boxes",
     "_classification_path",
   ):
     if field_name not in incoming:
@@ -436,6 +478,12 @@ def _merge_classification_entries(existing, incoming):
     if field_name in {"classes", "classes_short"}:
       if incoming.get(field_name):
         merged[field_name] = incoming[field_name]
+      continue
+
+    if field_name == "boxes":
+      boxes = _normalize_boxes(incoming.get(field_name))
+      if boxes:
+        merged[field_name] = boxes
       continue
 
     merged[field_name] = incoming[field_name]
@@ -635,12 +683,15 @@ def _write_classification_file(classification):
   labels = np.asarray(classification["labels"], dtype=np.uint32)
   classes = _normalize_text_list(classification.get("classes"))
   classes_short = _normalize_text_list(classification.get("classes_short"))
+  boxes = _normalize_boxes(classification.get("boxes"))
+  boxes_json = json.dumps(boxes, sort_keys=True, separators=(",", ":"))
   digest = hashlib.sha256()
   digest.update(classification["classifier_key"].encode("utf-8"))
   digest.update(prediction.tobytes())
   digest.update(labels.tobytes())
   digest.update("\0".join(classes).encode("utf-8"))
   digest.update("\0".join(classes_short).encode("utf-8"))
+  digest.update(boxes_json.encode("utf-8"))
   relative_path = f"{digest.hexdigest()}.npz"
   target_path = CLASSIFICATIONS_PATH / relative_path
   if target_path.is_file():
@@ -663,6 +714,7 @@ def _write_classification_file(classification):
       labels=labels,
       classes=np.asarray(classes, dtype=np.str_),
       classes_short=np.asarray(classes_short, dtype=np.str_),
+      boxes_json=np.asarray(boxes_json, dtype=np.str_),
     )
     os.replace(temp_path, target_path)
   finally:
@@ -693,6 +745,12 @@ def _load_classification_file(relative_path, fallback_key, fallback_labels):
       if "classes_short" in payload.files
       else []
     )
+    boxes = []
+    if "boxes_json" in payload.files:
+      try:
+        boxes = _normalize_boxes(json.loads(str(payload["boxes_json"].tolist())))
+      except (TypeError, ValueError, json.JSONDecodeError):
+        boxes = []
 
   classification = {
     "classifier_key": classifier_key,
@@ -704,6 +762,8 @@ def _load_classification_file(relative_path, fallback_key, fallback_labels):
     classification["classes"] = [str(value) for value in classes]
   if classes_short:
     classification["classes_short"] = [str(value) for value in classes_short]
+  if boxes:
+    classification["boxes"] = boxes
 
   return classification
 

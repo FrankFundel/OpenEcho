@@ -5,7 +5,10 @@ from PyInstaller.utils.hooks import collect_data_files
 
 
 def walk_package_modules(package_name):
-  package = importlib.import_module(package_name)
+  try:
+    package = importlib.import_module(package_name)
+  except ImportError:
+    return []
   modules = {package_name}
   package_paths = getattr(package, "__path__", None)
   if not package_paths:
@@ -46,7 +49,9 @@ for package_name in (
   "bacpipe",
   "bacpipe.embedding_generation_pipelines",
   "bacpipe.embedding_evaluation",
+  "bacpipe.model_pipelines",
   "bacpipe.model_specific_utils",
+  "bacpipe.model_pipelines.model_specific_utils",
 ):
   hiddenimports.extend(walk_package_modules(package_name))
 

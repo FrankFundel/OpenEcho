@@ -111,6 +111,14 @@ def overlay_worker_bat_support(site_packages):
       source_root / "model_specific_utils" / "bat",
       site_packages / "bacpipe" / "model_specific_utils" / "bat",
     ),
+    (
+      source_root / "model_pipelines" / "feature_extractors" / "bat.py",
+      site_packages / "bacpipe" / "model_pipelines" / "feature_extractors" / "bat.py",
+    ),
+    (
+      source_root / "model_pipelines" / "model_specific_utils" / "bat",
+      site_packages / "bacpipe" / "model_pipelines" / "model_specific_utils" / "bat",
+    ),
   ]
 
   for source_path, target_path in overlay_items:
@@ -237,6 +245,11 @@ def build_binary():
     pyinstaller_args.extend(["--exclude-module", module_name])
 
   add_data_if_exists(pyinstaller_args, ROOT / "models" / "BigBAT.pth", "models")
+  add_data_if_exists(
+    pyinstaller_args,
+    ROOT / "backend" / "inference" / "bat_label_map.csv",
+    "backend/inference",
+  )
   pyinstaller_args.append(str(ROOT / "main.py"))
 
   PyInstaller.__main__.run(pyinstaller_args)

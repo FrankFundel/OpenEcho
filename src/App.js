@@ -141,6 +141,10 @@ const mergeClassificationEntries = (existing, incoming) => {
       Array.isArray(incoming?.classes_short) && incoming.classes_short.length > 0
         ? incoming.classes_short
         : existing.classes_short,
+    boxes:
+      Array.isArray(incoming?.boxes)
+        ? incoming.boxes
+        : existing.boxes,
   };
 };
 
@@ -401,6 +405,7 @@ export class App extends Component {
       classifications: [],
       tabValue: 1,
       specTabValue: 0,
+      showBoundingBoxes: false,
       recordingData: EMPTY_RECORDING,
       recordingLocation: {
         lat: 0,
@@ -702,7 +707,7 @@ export class App extends Component {
       return;
     }
 
-    const key = `${range.start}:${range.end}`;
+    const key = `${selectedProject}:${selectedRecording}:${range.start}:${range.end}`;
     if (this.spectrogramPrefetches.has(key)) {
       return;
     }
@@ -1572,6 +1577,18 @@ export class App extends Component {
     this.setState({ predictionClassifier: classifierKey });
   };
 
+  loadClassifierClasses = async (classifierKey) => {
+    const classMetadata = await backend.get_classifier_classes(classifierKey);
+    this.setState((current) => ({
+      classifiers: current.classifiers.map((classifier) =>
+        classifier.key === classifierKey
+          ? { ...classifier, ...classMetadata }
+          : classifier
+      ),
+    }));
+    return classMetadata;
+  };
+
   handleProcessingModeChange = (event) => {
     const value = event.target.value;
     this.setState((current) => {
@@ -1716,6 +1733,7 @@ export class App extends Component {
       specViewEnd,
       specViewStart,
       specTabValue,
+      showBoundingBoxes,
       speciesDialog,
       tabValue,
       waveData,
@@ -1904,6 +1922,10 @@ export class App extends Component {
                 onSpecTabChange={(event, value) =>
                   this.setState({ specTabValue: value })
                 }
+                showBoundingBoxes={showBoundingBoxes}
+                onShowBoundingBoxesChange={(event) =>
+                  this.setState({ showBoundingBoxes: event.target.checked })
+                }
                 specLoading={specLoading}
                 selectedRecording={selectedRecording}
                 specData={specData}
@@ -1939,6 +1961,7 @@ export class App extends Component {
                 onPredictionClassifierChange={
                   this.handlePredictionClassifierChange
                 }
+                onLoadClassifierClasses={this.loadClassifierClasses}
                 onProcessingModeChange={this.handleProcessingModeChange}
                 classifyAllLoading={classifyAllLoading}
                 classifyAllProgress={classifyAllProgress}

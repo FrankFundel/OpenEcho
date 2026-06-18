@@ -16,12 +16,14 @@ import types
 import numpy as np
 import soundfile as sf
 
+from backend.inference.bat_label_map import canonical_bat_labels
 from backend.paths import data_path, resource_root
 
 
 CLASSIFIER_MODEL_NAMES = {
   "audioprotopnet",
   "bat",
+  "batdetect2_dets_avg",
   "birdnet",
   "convnext_birdset",
   "google_whale",
@@ -34,6 +36,7 @@ BUNDLED_WORKER_MODEL_NAMES = CLASSIFIER_MODEL_NAMES - {"bat2"}
 MULTILABEL_MODEL_NAMES = {
   "bat",
   "bat2",
+  "batdetect2_dets_avg",
 }
 TENSORFLOW_MODEL_NAMES = {
   "birdnet",
@@ -51,6 +54,7 @@ DISPLAY_NAME_OVERRIDES = {
   "aves_especies": "AVES eSpecies",
   "bat": "BAT",
   "bat2": "BAT2",
+  "batdetect2_dets_avg": "BatDetect2",
   "beats": "BEATs",
   "birdaves_especies": "BirdAVES eSpecies",
   "birdmae": "BirdMAE",
@@ -67,11 +71,21 @@ DISPLAY_NAME_OVERRIDES = {
   "surfperch": "SurfPerch",
   "vggish": "VGGish",
 }
+MODEL_DESCRIPTION_OVERRIDES = {
+  "bat": "A transformer-based acoustic classifier for identifying European bat species from ultrasonic recordings.",
+  "bat2": "A compact bat-call classifier tuned for species-level predictions on ultrasonic audio.",
+  "batdetect2_dets_avg": "Detects bat calls and combines detection-level features into species predictions.",
+  "birdnet": "A broad bird-sound classifier designed for species recognition in environmental recordings.",
+  "google_whale": "A bioacoustic classifier for recognizing whale vocalizations.",
+}
 MODEL_ORDER_PRIORITY = {
   "bat": 0,
   "bat2": 1,
+  "batdetect2_dets_avg": 2,
 }
 MULTILABEL_THRESHOLD = 0.5
+CAM_BOX_THRESHOLD = 0.8
+CAM_BOX_MIN_AREA = 4
 REPO_ROOT = resource_root()
 DEFAULT_TF_VENV_PYTHON = REPO_ROOT / ".venv-tf" / "bin" / "python"
 WORKER_PROCESS_ENV_VAR = "OPENECHO_BACPIPE_WORKER"
@@ -180,6 +194,199 @@ def provider_label(model_name):
 def make_short_label(label):
   clean = re.sub(r"[^A-Za-z0-9]+", "", str(label))
   return clean if len(clean) <= 10 else clean[:10]
+
+
+def format_class_metadata(model_name, classes):
+  classes = [str(label) for label in classes or []]
+  if model_name in {"bat", "bat2", "batdetect2_dets_avg"}:
+    classes_short = canonical_bat_labels(classes)
+  else:
+    classes_short = [make_short_label(label) for label in classes]
+  return {
+    "classes": classes,
+    "classes_short": classes_short,
+  }
+
+
+def normalize_cam_map(cam_map):
+  cam_map = np.asarray(cam_map, dtype=np.float32)
+  if cam_map.size == 0:
+    return cam_map
+  minimum = np.nanmin(cam_map)
+  maximum = np.nanmax(cam_map)
+  if not np.isfinite(minimum) or not np.isfinite(maximum) or maximum <= minimum:
+    return np.zeros_like(cam_map, dtype=np.float32)
+  return (cam_map - minimum) / (maximum - minimum)
+
+
+def bat_layercam_target_layers(model):
+  encoder = getattr(model, "transformer_encoder", None)
+  layers = getattr(encoder, "layers", None)
+  if not layers or len(layers) < 2:
+    return []
+
+  target_layers = []
+  for layer_index, block_index in ((1, 0), (0, 0), (1, 1), (0, 1)):
+    try:
+      target_layers.append(layers[layer_index][block_index].norm)
+    except (AttributeError, IndexError, TypeError):
+      continue
+  return target_layers
+
+
+def bat_layercam_reshape(tensor):
+  if tensor.ndim == 3 and tensor.shape[1] > 1:
+    batch_size, token_count, width = tensor.shape
+    token_count -= 1
+    return (
+      tensor[:, 1:]
+      .reshape(batch_size, token_count, 1, width)
+      .permute(0, 3, 1, 2)
+    )
+  if tensor.ndim == 4:
+    return tensor
+  return None
+
+
+def layercam_maps(model, input_tensor, class_indexes):
+  import torch
+  import torch.nn.functional as functional
+
+  class_indexes = [int(index) for index in class_indexes]
+  if not class_indexes:
+    with torch.no_grad():
+      return torch.sigmoid(model(input_tensor)).detach().cpu().numpy(), {}
+
+  target_layers = bat_layercam_target_layers(model)
+  if not target_layers:
+    with torch.no_grad():
+      return torch.sigmoid(model(input_tensor)).detach().cpu().numpy(), {}
+
+  activations = {}
+  gradients = {}
+  handles = []
+
+  def make_forward_hook(layer_index):
+    def forward_hook(_module, _inputs, output):
+      reshaped = bat_layercam_reshape(output)
+      if reshaped is None or not reshaped.requires_grad:
+        return
+      activations[layer_index] = reshaped
+
+      def gradient_hook(gradient):
+        reshaped_gradient = bat_layercam_reshape(gradient)
+        if reshaped_gradient is not None:
+          gradients[layer_index] = reshaped_gradient
+
+      output.register_hook(gradient_hook)
+    return forward_hook
+
+  for layer_index, layer in enumerate(target_layers):
+    handles.append(layer.register_forward_hook(make_forward_hook(layer_index)))
+
+  try:
+    model.zero_grad(set_to_none=True)
+    logits = model(input_tensor)
+    probabilities = torch.sigmoid(logits).detach().cpu().numpy()
+    cam_by_class = {}
+    output_size = tuple(input_tensor.shape[-2:])
+
+    for class_index in class_indexes:
+      gradients.clear()
+      model.zero_grad(set_to_none=True)
+      logits[:, class_index].sum().backward(retain_graph=True)
+
+      layer_cams = []
+      for layer_index, activation in activations.items():
+        gradient = gradients.get(layer_index)
+        if gradient is None:
+          continue
+        cam = (torch.relu(gradient) * torch.relu(activation)).sum(dim=1, keepdim=True)
+        cam = functional.interpolate(
+          cam,
+          size=output_size,
+          mode="bilinear",
+          align_corners=False,
+        )
+        layer_cams.append(cam.squeeze(1).detach().cpu().numpy())
+
+      if layer_cams:
+        cam_by_class[class_index] = normalize_cam_map(np.mean(layer_cams, axis=0))
+
+    return probabilities, cam_by_class
+  finally:
+    for handle in handles:
+      handle.remove()
+
+
+def boxes_from_cam_map(
+  cam_map,
+  segment_offset,
+  segment_duration,
+  max_frequency_khz,
+  class_index,
+  label,
+  class_score,
+  source,
+  clip_end=None,
+):
+  from scipy import ndimage
+
+  cam_map = normalize_cam_map(cam_map)
+  if cam_map.ndim != 2 or cam_map.size == 0:
+    return []
+
+  mask = cam_map >= CAM_BOX_THRESHOLD
+  if not np.any(mask):
+    return []
+
+  component_map, component_count = ndimage.label(mask)
+  slices = ndimage.find_objects(component_map)
+  time_count, frequency_count = cam_map.shape
+  boxes = []
+
+  for component_index in range(1, component_count + 1):
+    component_slice = slices[component_index - 1]
+    if component_slice is None:
+      continue
+
+    time_slice, frequency_slice = component_slice
+    component = component_map[component_slice] == component_index
+    area = int(component.sum())
+    if area < CAM_BOX_MIN_AREA:
+      continue
+
+    start = segment_offset + (time_slice.start / time_count) * segment_duration
+    end = segment_offset + (time_slice.stop / time_count) * segment_duration
+    if clip_end is not None:
+      end = min(end, clip_end)
+    if end <= start:
+      continue
+    low_freq = (frequency_slice.start / frequency_count) * max_frequency_khz
+    high_freq = (frequency_slice.stop / frequency_count) * max_frequency_khz
+    score = float(cam_map[component_slice][component].mean())
+
+    boxes.append({
+      "start": float(start),
+      "end": float(end),
+      "low_freq": float(low_freq),
+      "high_freq": float(high_freq),
+      "score": score,
+      "class_score": float(class_score),
+      "class_index": int(class_index),
+      "label": label,
+      "source": source,
+    })
+
+  return boxes
+
+
+def audio_duration_seconds(recording_path, proclen=0):
+  info = sf.info(str(recording_path))
+  duration = info.frames / info.samplerate if info.samplerate else 0.0
+  if proclen and float(proclen) > 0:
+    duration = min(duration, float(proclen))
+  return duration
 
 
 @lru_cache(maxsize=1)
@@ -293,7 +500,11 @@ def worker_runtime_status(python_path):
 @lru_cache(maxsize=1)
 def prime_bacpipe_non_tf_compat():
   tensorflow_ready, _ = tensorflow_runtime_status()
-  if tensorflow_ready or "bacpipe.embedding_generation_pipelines.utils" in sys.modules:
+  compat_modules = (
+    "bacpipe.embedding_generation_pipelines.utils",
+    "bacpipe.model_pipelines.model_utils",
+  )
+  if tensorflow_ready or any(module_name in sys.modules for module_name in compat_modules):
     return
 
   # Force torch-only transformer code paths in the main process when the local
@@ -318,7 +529,12 @@ def prime_bacpipe_non_tf_compat():
   previous_tensorflow = sys.modules.get("tensorflow")
   sys.modules["tensorflow"] = tensorflow_stub
   try:
-    importlib.import_module("bacpipe.embedding_generation_pipelines.utils")
+    for module_name in compat_modules:
+      try:
+        importlib.import_module(module_name)
+        break
+      except ModuleNotFoundError:
+        continue
   finally:
     if previous_tensorflow is None:
       sys.modules.pop("tensorflow", None)
@@ -378,7 +594,14 @@ def model_runtime_available(model_name):
       return False
     return True
 
-  if load_bacpipe() is None:
+  bacpipe = load_bacpipe()
+  if bacpipe is None:
+    return False
+
+  if (
+    model_name not in TENSORFLOW_MODEL_NAMES and
+    model_name not in set(getattr(bacpipe, "supported_models", []))
+  ):
     return False
 
   try:
@@ -395,17 +618,12 @@ def get_bacpipe_classifiers():
     if not model_runtime_available(model_name):
       continue
 
-    classes = []
-    classes_short = []
+    if model_name == "bat2":
+      from backend.inference.bacpipe_bat_adapter import get_bat_class_labels
 
-    if model_name in {"bat", "bat2"}:
-      from backend.inference.bacpipe_bat_adapter import (
-        get_bat_class_labels,
-        get_bat_class_short_labels,
-      )
-
-      classes = get_bat_class_labels()
-      classes_short = get_bat_class_short_labels()
+      class_metadata = format_class_metadata(model_name, get_bat_class_labels())
+    else:
+      class_metadata = {"classes": [], "classes_short": []}
 
     classifiers.append(
       {
@@ -414,8 +632,16 @@ def get_bacpipe_classifiers():
         "provider": "bacpipe",
         "provider_label": provider_label(model_name),
         "model_name": model_name,
-        "classes": classes,
-        "classes_short": classes_short,
+        "task_type": "multi-label" if model_name in MULTILABEL_MODEL_NAMES else "single-label",
+        "tags": [
+          provider_label(model_name),
+          "multi-label" if model_name in MULTILABEL_MODEL_NAMES else "single-label",
+        ],
+        "description": MODEL_DESCRIPTION_OVERRIDES.get(
+          model_name,
+          f"{display_name(model_name)} is an acoustic classification model provided through BacPipe.",
+        ),
+        **class_metadata,
       }
     )
   return classifiers
@@ -518,6 +744,25 @@ class BacpipeClassifierService:
   def validate(self, classifier_config):
     resolve_runtime(classifier_config["model_name"])
 
+  def get_classes(self, classifier_config):
+    model_name = classifier_config["model_name"]
+    if model_name == "bat2":
+      from backend.inference.bacpipe_bat_adapter import get_bat_class_labels
+
+      return format_class_metadata(model_name, get_bat_class_labels())
+
+    runtime, worker_python = resolve_runtime(model_name)
+    if runtime == "worker":
+      return self.get_classes_with_worker(worker_python, model_name)
+
+    model = self.get_embedder(model_name).model
+    classes = getattr(model, "classes", None)
+    if classes is None:
+      raise RuntimeError(
+        f"{display_name(model_name)} does not expose class metadata."
+      )
+    return format_class_metadata(model_name, classes)
+
   def predict(self, classifier_config, recording_path, proclen=0):
     model_name = classifier_config["model_name"]
     runtime, worker_python = resolve_runtime(model_name)
@@ -529,10 +774,251 @@ class BacpipeClassifierService:
     if model_name == "bat2":
       from backend.inference.bacpipe_bat_adapter import get_bat_class_labels
 
-      segment_probabilities = self.get_bat2_model().predict(recording_path, proclen=proclen)
-      return self.build_classification("bat2", segment_probabilities, get_bat_class_labels())
+      segment_probabilities, boxes = self.predict_bat2_with_layercam_boxes(recording_path, proclen=proclen)
+      classification, predicted_classes = self.build_classification(
+        "bat2",
+        segment_probabilities,
+        get_bat_class_labels(),
+      )
+      classification["boxes"] = boxes
+      return classification, predicted_classes
+
+    if model_name == "bat":
+      return self.predict_bat_with_layercam_boxes(recording_path, proclen=proclen)
+
+    if model_name == "batdetect2_dets_avg":
+      return self.predict_batdetect2_dets_avg(recording_path, proclen=proclen)
 
     return self.predict_embedder(model_name, recording_path, proclen=proclen)
+
+  def predict_bat2_with_layercam_boxes(self, recording_path, proclen=0):
+    import torch
+    from torch.utils.data import DataLoader
+    import librosa
+    from scipy import signal
+    from backend.inference.bacpipe_bat_adapter import (
+      BAT2_FILTER_A,
+      BAT2_FILTER_B,
+      BAT2_SAMPLE_RATE,
+      get_bat_class_labels,
+      pad_and_slide_window,
+      preprocess_bat2,
+    )
+
+    bat2_model = self.get_bat2_model()
+    duration = None if not proclen else proclen
+    waveform, _ = librosa.load(
+      str(recording_path),
+      sr=BAT2_SAMPLE_RATE,
+      duration=duration,
+      mono=True,
+    )
+    waveform = signal.lfilter(BAT2_FILTER_B, BAT2_FILTER_A, waveform)
+    samples_per_step = 22 * (512 // 4)
+    segment_stride_seconds = (60 * samples_per_step) / BAT2_SAMPLE_RATE
+    segment_duration = ((60 + 1) * samples_per_step) / BAT2_SAMPLE_RATE
+    audio_duration = len(waveform) / BAT2_SAMPLE_RATE if BAT2_SAMPLE_RATE else None
+    windows = pad_and_slide_window(
+      torch.tensor(waveform, dtype=torch.float32, device=bat2_model.device),
+      (60 + 1) * samples_per_step,
+      60 * samples_per_step,
+    )
+    features = preprocess_bat2(windows, 512)
+    classes_short = canonical_bat_labels(get_bat_class_labels())
+    segment_probabilities = []
+    boxes = []
+    segment_index = 0
+
+    for batch in DataLoader(features, batch_size=1, shuffle=False):
+      batch = batch.to(bat2_model.device)
+      with torch.no_grad():
+        logits = bat2_model.model(batch)
+        preliminary_probabilities = torch.sigmoid(logits).detach().cpu().numpy()
+      class_indexes = np.flatnonzero(preliminary_probabilities[0] > MULTILABEL_THRESHOLD).tolist()
+      probabilities, cam_by_class = layercam_maps(
+        bat2_model.model,
+        batch,
+        class_indexes,
+      )
+      segment_probabilities.append(probabilities)
+
+      for class_index, cam_batch in cam_by_class.items():
+        if class_index >= len(classes_short):
+          continue
+        boxes.extend(
+          boxes_from_cam_map(
+            cam_batch[0],
+            segment_offset=segment_index * segment_stride_seconds,
+            segment_duration=segment_duration,
+            max_frequency_khz=BAT2_SAMPLE_RATE / 2000.0,
+            class_index=class_index,
+            label=classes_short[class_index],
+            class_score=probabilities[0, class_index],
+            source="bat2_layercam",
+            clip_end=audio_duration,
+          )
+        )
+
+      segment_index += len(batch)
+
+    if not segment_probabilities:
+      raise RuntimeError("BAT2 returned no classifier outputs.")
+
+    return np.concatenate(segment_probabilities, axis=0), boxes
+
+  def predict_bat_with_layercam_boxes(self, recording_path, proclen=0):
+    import torch
+
+    embedder = self.get_embedder("bat")
+    if not getattr(embedder.model, "bool_classifier", False):
+      raise ValueError("bat does not provide pretrained class predictions.")
+
+    classes = list(embedder.model.classes)
+    classes_short = canonical_bat_labels(classes)
+    segment_duration = embedder.model.segment_length / embedder.model.sr
+    audio_duration = audio_duration_seconds(recording_path, proclen)
+    segment_probabilities = []
+    boxes = []
+    segment_index = 0
+
+    with trimmed_audio(recording_path, proclen) as inference_path:
+      samples = embedder.prepare_audio(inference_path)
+      for batch in embedder.init_dataloader(samples):
+        if embedder.model.device == "cuda" and hasattr(batch, "cuda"):
+          batch = batch.cuda()
+
+        with torch.no_grad():
+          logits = embedder.model.model(batch)
+          preliminary_probabilities = torch.sigmoid(logits).detach().cpu().numpy()
+        active_class_indexes = sorted(
+          {
+            int(index)
+            for row in preliminary_probabilities
+            for index in np.flatnonzero(row > MULTILABEL_THRESHOLD)
+          }
+        )
+        probabilities, cam_by_class = layercam_maps(
+          embedder.model.model,
+          batch,
+          active_class_indexes,
+        )
+        segment_probabilities.append(probabilities)
+
+        for batch_index in range(probabilities.shape[0]):
+          for class_index, cam_batch in cam_by_class.items():
+            if class_index >= len(classes_short):
+              continue
+            if probabilities[batch_index, class_index] <= MULTILABEL_THRESHOLD:
+              continue
+            boxes.extend(
+              boxes_from_cam_map(
+                cam_batch[batch_index],
+                segment_offset=(segment_index + batch_index) * segment_duration,
+                segment_duration=segment_duration,
+                max_frequency_khz=embedder.model.sr / 2000.0,
+                class_index=class_index,
+                label=classes_short[class_index],
+                class_score=probabilities[batch_index, class_index],
+                source="bat_layercam",
+                clip_end=audio_duration,
+              )
+            )
+
+        segment_index += probabilities.shape[0]
+
+    if not segment_probabilities:
+      raise RuntimeError("BAT returned no classifier outputs.")
+
+    classification, predicted_classes = self.build_classification(
+      "bat",
+      np.concatenate(segment_probabilities, axis=0),
+      classes,
+    )
+    classification["boxes"] = boxes
+    return classification, predicted_classes
+
+  def predict_batdetect2_dets_avg(self, recording_path, proclen=0):
+    import torch
+
+    embedder = self.get_embedder("batdetect2_dets_avg")
+    batdetect2_module = importlib.import_module(
+      "bacpipe.model_pipelines.feature_extractors.batdetect2_dets_avg"
+    )
+    class_scores = []
+    boxes = []
+    segment_seconds = embedder.model.segment_length / embedder.model.sr
+    with trimmed_audio(recording_path, proclen) as inference_path:
+      samples = embedder.prepare_audio(inference_path)
+      if isinstance(samples, torch.Tensor) and samples.ndim == 2:
+        samples = samples.unsqueeze(0)
+
+      segment_index = 0
+      for batch in embedder.init_dataloader(samples):
+        if embedder.model.device == "cuda" and hasattr(batch, "cuda"):
+          batch = batch.cuda()
+        with torch.no_grad():
+          output = embedder.model.model(batch.unsqueeze(1))
+          results, features = embedder.model.non_max_suppression(
+            output,
+            sampling_rate=np.array([embedder.model.sr] * batch.shape[0]),
+          )
+
+        batch_class_scores = []
+        for result, feature in zip(results, features):
+          _, segment_class_scores = batdetect2_module.get_mean_detection_features(
+            result,
+            feature,
+            top_k=embedder.model.top_k_detections,
+          )
+          if not isinstance(segment_class_scores, torch.Tensor):
+            segment_class_scores = torch.as_tensor(segment_class_scores)
+          batch_class_scores.append(segment_class_scores.detach().cpu())
+
+          segment_offset = segment_index * segment_seconds
+          class_probabilities = np.asarray(result.get("class_probs", []), dtype=np.float32)
+          if class_probabilities.ndim == 2 and class_probabilities.shape[0] > len(embedder.model.classes):
+            class_probabilities = class_probabilities[:-1]
+
+          for detection_index, detection_score in enumerate(result.get("det_probs", [])):
+            if (
+              class_probabilities.ndim != 2 or
+              detection_index >= class_probabilities.shape[1]
+            ):
+              class_index = None
+              class_score = None
+              label = None
+            else:
+              class_index = int(np.argmax(class_probabilities[:, detection_index]))
+              class_score = float(class_probabilities[class_index, detection_index])
+              label = canonical_bat_labels([embedder.model.classes[class_index]])[0]
+
+            boxes.append({
+              "start": float(segment_offset + result["start_times"][detection_index]),
+              "end": float(segment_offset + result["end_times"][detection_index]),
+              "low_freq": float(result["low_freqs"][detection_index] / 1000.0),
+              "high_freq": float(result["high_freqs"][detection_index] / 1000.0),
+              "score": float(detection_score),
+              "class_score": class_score,
+              "class_index": class_index,
+              "label": label,
+            })
+
+          segment_index += 1
+
+        if batch_class_scores:
+          class_scores.append(torch.stack(batch_class_scores))
+
+    if not class_scores:
+      raise RuntimeError("batdetect2_dets_avg returned no classifier outputs.")
+
+    segment_probabilities = torch.cat(class_scores, dim=0).numpy()
+    classification, predicted_classes = self.build_classification(
+      "batdetect2_dets_avg",
+      segment_probabilities,
+      list(embedder.model.classes),
+    )
+    classification["boxes"] = boxes
+    return classification, predicted_classes
 
   def predict_embedder(self, model_name, recording_path, proclen=0):
     import torch
@@ -573,7 +1059,10 @@ class BacpipeClassifierService:
     if segment_probabilities.ndim == 1:
       segment_probabilities = segment_probabilities.reshape(1, -1)
 
-    mean_probabilities = segment_probabilities.mean(axis=0)
+    if model_name == "batdetect2_dets_avg":
+      mean_probabilities = segment_probabilities.max(axis=0)
+    else:
+      mean_probabilities = segment_probabilities.mean(axis=0)
     if model_name in MULTILABEL_MODEL_NAMES:
       labels = np.flatnonzero(mean_probabilities > MULTILABEL_THRESHOLD).tolist()
       labels.sort(key=lambda index: mean_probabilities[index], reverse=True)
@@ -582,13 +1071,9 @@ class BacpipeClassifierService:
       labels = [int(np.argmax(mean_probabilities))]
 
     if model_name in {"bat", "bat2"}:
-      from backend.inference.bacpipe_bat_adapter import (
-        get_bat_class_labels,
-        get_bat_class_short_labels,
-      )
-
-      short_label_by_class = dict(zip(get_bat_class_labels(), get_bat_class_short_labels()))
-      classes_short = [short_label_by_class.get(label, make_short_label(label)) for label in classes]
+      classes_short = canonical_bat_labels(classes)
+    elif model_name == "batdetect2_dets_avg":
+      classes_short = canonical_bat_labels(classes)
     else:
       classes_short = [make_short_label(label) for label in classes]
 
@@ -670,3 +1155,31 @@ class BacpipeClassifierService:
 
     payload = parse_worker_payload(completed.stdout)
     return payload["classification"], payload["classes"]
+
+  def get_classes_with_worker(self, python_path, model_name):
+    completed = subprocess.run(
+      [
+        str(python_path),
+        "-m",
+        "backend.inference.bacpipe_worker",
+        "--classes",
+        model_name,
+      ],
+      capture_output=True,
+      text=True,
+      cwd=worker_subprocess_cwd(python_path),
+      env=worker_subprocess_env(python_path),
+      check=False,
+    )
+    if completed.returncode != 0:
+      stderr = completed.stderr.strip()
+      stdout = completed.stdout.strip()
+      raise RuntimeError(stderr or stdout or "Bacpipe worker process failed.")
+
+    try:
+      payload = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as error:
+      raise RuntimeError("Bacpipe worker returned invalid class metadata.") from error
+    if not isinstance(payload, dict) or not isinstance(payload.get("classes"), list):
+      raise RuntimeError("Bacpipe worker returned invalid class metadata.")
+    return payload

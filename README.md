@@ -9,7 +9,7 @@ It is a desktop app for reviewing, organizing, and classifying long-duration bio
 - Organize recordings in local projects
 - Browse spectrograms and waveform previews
 - Play selected windows at different expansion rates
-- Run BacPipe classifier models, including `BAT`
+- Run BacPipe classifier models, including `BAT` and `BatDetect2`
 - Export project results as CSV
 
 ## 🧱 Stack
@@ -66,6 +66,7 @@ This will:
 OpenEcho uses [`bacpipe`](https://pypi.org/project/bacpipe/) for classifier models.
 
 - `BAT` uses BacPipe's built-in BAT model
+- `BatDetect2` uses BacPipe's BatDetect2 detection-average classifier
 - `BAT2` is included as an additional local model adapter
 - some TensorFlow-based BacPipe models run in a separate worker environment
 

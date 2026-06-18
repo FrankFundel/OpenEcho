@@ -19,3 +19,6 @@ class ClassifierService:
 
   def validate(self, classifier_config):
     self._get_bacpipe_service().validate(classifier_config)
+
+  def get_classes(self, classifier_config):
+    return self._get_bacpipe_service().get_classes(classifier_config)

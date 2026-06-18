@@ -6,9 +6,19 @@ from backend.inference.bacpipe_provider import BacpipeClassifierService
 
 
 def main():
+  if len(sys.argv) == 3 and sys.argv[1] == "--classes":
+    service = BacpipeClassifierService()
+    with redirect_stdout(sys.stderr):
+      payload = service.get_classes({"model_name": sys.argv[2]})
+    sys.stdout.write(json.dumps(payload))
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    return
+
   if len(sys.argv) not in {3, 4}:
     raise SystemExit(
-      "Usage: python -m backend.inference.bacpipe_worker <model-name> <recording-path> [proclen]"
+      "Usage: python -m backend.inference.bacpipe_worker <model-name> <recording-path> [proclen] "
+      "or: python -m backend.inference.bacpipe_worker --classes <model-name>"
     )
 
   model_name = sys.argv[1]

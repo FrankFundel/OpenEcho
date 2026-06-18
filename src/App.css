@@ -125,6 +125,18 @@ body {
   padding: 12px 16px 16px;
 }
 
+.spectrogramHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.boundingBoxToggle {
+  margin-right: 8px;
+  color: rgba(255, 255, 255, 0.72);
+}
+
 .spectrogramSection {
   position: relative;
   flex: 1 1 52%;
@@ -171,8 +183,6 @@ body {
   pointer-events: none;
 }
 
-<<<<<<< ours
-=======
 .gpuSpectrogramHandle {
   position: absolute;
   display: none;
@@ -182,7 +192,6 @@ body {
   touch-action: none;
 }
 
->>>>>>> theirs
 .gpuSpectrogramMessage {
   position: absolute;
   inset: 0;
@@ -318,7 +327,10 @@ body {
 
 .predictionBarRow {
   display: grid;
-  grid-template-columns: minmax(72px, 0.72fr) minmax(0, 4.6fr) minmax(44px, auto);
+  grid-template-columns: minmax(72px, 0.72fr) minmax(0, 4.6fr) minmax(
+      44px,
+      auto
+    );
   align-items: center;
   gap: 8px;
 }
@@ -413,6 +425,136 @@ body {
   flex-wrap: wrap;
   gap: 12px;
   align-items: center;
+}
+
+.modelInfoList {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.modelInfoCard {
+  display: flex;
+  flex-direction: column;
+  padding: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background:
+    radial-gradient(
+      circle at top right,
+      rgba(var(--accent-lightblue-rgb), 0.12),
+      transparent 42%
+    ),
+    rgba(255, 255, 255, 0.025);
+}
+
+.modelInfoHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.modelInfoName {
+  line-height: 1.2;
+}
+
+.modelTagList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.modelInfoTag {
+  height: 22px;
+  color: rgba(255, 255, 255, 0.72);
+  border-color: rgba(255, 255, 255, 0.16);
+  text-transform: lowercase;
+}
+
+.modelInfoDescription {
+  max-width: 760px;
+  margin: 0;
+  line-height: 1.55;
+}
+
+.advancedSettingsSection {
+  padding-top: 12px;
+}
+
+.advancedSettingsButton {
+  margin-top: 0;
+  margin-left: -8px;
+  opacity: 0.62;
+  font-size: 0.76rem;
+  text-transform: none;
+}
+
+.advancedSettingsButton:hover {
+  opacity: 1;
+}
+
+.advancedSettingsPanel {
+  display: grid;
+  gap: 14px;
+  margin-top: 8px;
+  padding: 14px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.advancedSetting {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 280px);
+  align-items: center;
+  gap: 20px;
+}
+
+.advancedSettingControl {
+  display: grid;
+  grid-template-columns: 1fr 36px;
+  align-items: center;
+  gap: 10px;
+}
+
+.resultLimitSelect {
+  width: 100px;
+  justify-self: end;
+}
+
+.modelInfoEmpty {
+  min-height: 108px;
+  padding: 20px;
+  text-align: center;
+}
+
+.modelClassesMenu {
+  width: min(360px, calc(100vw - 32px));
+  max-height: 420px;
+}
+
+.modelClassesMenuHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+}
+
+.modelClassesSearch {
+  padding: 4px 12px 12px;
+}
+
+.modelClassesStatus {
+  display: flex;
+  min-height: 96px;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 20px;
+  text-align: center;
 }
 
 .classifierAutocomplete {
@@ -755,5 +897,15 @@ body {
   .speciesDialogEmptyState,
   .speciesWikiCard {
     min-height: 240px;
+  }
+
+  .modelInfoHeader,
+  .advancedSetting {
+    grid-template-columns: 1fr;
+    flex-direction: column;
+  }
+
+  .resultLimitSelect {
+    justify-self: start;
   }
 }

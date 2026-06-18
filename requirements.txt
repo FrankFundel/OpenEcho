@@ -1,4 +1,4 @@
-bacpipe @ git+https://github.com/bioacoustic-ai/bacpipe.git@55248998654fc2376c75615c20f373a4265b00ee
+bacpipe @ git+https://github.com/bioacoustic-ai/bacpipe.git@52cbf3cd31d077d5ca6d05b735b7a608552e1c0b
 fastapi>=0.110,<1
 librosa==0.10.1
 numpy==1.25.0

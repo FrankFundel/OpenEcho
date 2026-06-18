@@ -9,6 +9,7 @@ from scipy import signal
 import torch
 from torch import nn
 
+from backend.inference.bat_label_map import canonical_bat_labels
 from backend.paths import resource_root
 
 BAT2_CHECKPOINT_PATH = resource_root() / "models" / "BigBAT.pth"
@@ -32,26 +33,6 @@ BAT_CLASS_LABELS = [
   "Miniopterus schreibersii",
   "Vespertilio murinus",
 ]
-BAT_CLASS_SHORT_LABELS = [
-  "Rfer",
-  "Rhip",
-  "Mdaub",
-  "Mbrandt",
-  "Mmys",
-  "Mem",
-  "Mnat",
-  "Mmyo",
-  "Mdas",
-  "Nnoc",
-  "Nleis",
-  "Ppip",
-  "Pnat",
-  "Pkuhl",
-  "Eser",
-  "Enil",
-  "Mschreib",
-  "Vmur",
-]
 BAT2_SAMPLE_RATE = 22050 * 10
 BAT2_FILTER_B, BAT2_FILTER_A = signal.butter(
   10,
@@ -66,7 +47,7 @@ def get_bat_class_labels():
 
 
 def get_bat_class_short_labels():
-  return list(BAT_CLASS_SHORT_LABELS)
+  return canonical_bat_labels(BAT_CLASS_LABELS)
 
 
 class PreNorm(nn.Module):
@@ -301,8 +282,12 @@ class BacpipeBat2Classifier:
 
 __all__ = [
   "BAT2_CHECKPOINT_PATH",
-  "BAT_CLASS_SHORT_LABELS",
+  "BAT2_FILTER_A",
+  "BAT2_FILTER_B",
+  "BAT2_SAMPLE_RATE",
   "BacpipeBat2Classifier",
   "get_bat_class_labels",
   "get_bat_class_short_labels",
+  "pad_and_slide_window",
+  "preprocess_bat2",
 ]

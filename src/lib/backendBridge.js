@@ -26,7 +26,9 @@ class BackendBridge {
     this.ws = null;
     this.wsReconnectTimer = null;
     this.wsReady = false;
+    this.backendReady = false;
     this.healthPromise = null;
+    this.inFlightGetRequests = new Map();
     this.connectWebSocket();
   }
 
@@ -42,6 +44,10 @@ class BackendBridge {
   }
 
   async ensureBackendReady() {
+    if (this.backendReady) {
+      return;
+    }
+
     if (this.healthPromise) {
       return this.healthPromise;
     }
@@ -53,6 +59,7 @@ class BackendBridge {
         try {
           const response = await fetch(`${API_BASE}/health`);
           if (response.ok) {
+            this.backendReady = true;
             return;
           }
           lastError = new Error(`Health check failed with ${response.status}`);
@@ -117,24 +124,48 @@ class BackendBridge {
   async request(path, options = {}) {
     await this.ensureBackendReady();
 
-    const response = await fetch(`${API_BASE}${path}`, {
-      headers: {
-        "Content-Type": "application/json",
-        ...(options.headers || {}),
-      },
+    const method = (options.method || "GET").toUpperCase();
+    const hasBody = Object.prototype.hasOwnProperty.call(options, "body");
+    const headers = {
+      ...(hasBody ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers || {}),
+    };
+    const requestOptions = {
       ...options,
-    });
+      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+    };
+    const requestKey = method === "GET" ? `${method} ${path}` : null;
 
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(text || `Request failed: ${response.status}`);
+    if (requestKey && this.inFlightGetRequests.has(requestKey)) {
+      return this.inFlightGetRequests.get(requestKey);
     }
 
-    if (response.status === 204) {
-      return null;
+    const requestPromise = (async () => {
+      const response = await fetch(`${API_BASE}${path}`, requestOptions);
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || `Request failed: ${response.status}`);
+      }
+
+      if (response.status === 204) {
+        return null;
+      }
+
+      return response.json();
+    })();
+
+    if (requestKey) {
+      this.inFlightGetRequests.set(requestKey, requestPromise);
+      const clearInFlightRequest = () => {
+        if (this.inFlightGetRequests.get(requestKey) === requestPromise) {
+          this.inFlightGetRequests.delete(requestKey);
+        }
+      };
+      requestPromise.then(clearInFlightRequest, clearInFlightRequest);
     }
 
-    return response.json();
+    return requestPromise;
   }
 
   callbackify(executor) {
@@ -149,6 +180,11 @@ class BackendBridge {
 
   get_classifiers() {
     return this.callbackify(() => this.request("/api/classifiers"));
+  }
+
+  get_classifier_classes(classifierKey) {
+    const params = new URLSearchParams({ classifierKey });
+    return this.request(`/api/classifiers/classes?${params.toString()}`);
   }
 
   get_projects() {
