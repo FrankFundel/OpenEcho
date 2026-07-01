@@ -305,8 +305,7 @@ def layercam_maps(model, input_tensor, class_indexes):
         cam = functional.interpolate(
           cam,
           size=output_size,
-          mode="bilinear",
-          align_corners=False,
+          mode="nearest",
         )
         layer_cams.append(cam.squeeze(1).detach().cpu().numpy())
 

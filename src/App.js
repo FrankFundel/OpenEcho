@@ -82,7 +82,7 @@ const EMPTY_RECORDING = {
 };
 
 const SPECTROGRAM_PREFETCH_SECONDS = 8;
-const SPECTROGRAM_CACHE_TOLERANCE_FRAMES = 2;
+const SPECTROGRAM_WINDOW_LOAD_DEBOUNCE_MS = 80;
 
 const splitSpeciesText = (value) =>
   value
@@ -367,6 +367,8 @@ export class App extends Component {
 
   spectrogramRequestId = 0;
 
+  spectrogramWindowLoadTimer = null;
+
   spectrogramChunkCache = [];
 
   spectrogramPrefetches = new Set();
@@ -456,6 +458,7 @@ export class App extends Component {
     window.clearTimeout(this.classifierLoadRetryTimer);
     window.clearTimeout(this.projectLoadRetryTimer);
     window.clearTimeout(this.playbackCompletionTimer);
+    window.clearTimeout(this.spectrogramWindowLoadTimer);
   }
 
   openAlert = (title, text) => {
@@ -477,6 +480,8 @@ export class App extends Component {
   };
 
   clearSpectrogramCache = () => {
+    window.clearTimeout(this.spectrogramWindowLoadTimer);
+    this.spectrogramWindowLoadTimer = null;
     this.spectrogramCacheToken += 1;
     this.spectrogramChunkCache = [];
     this.spectrogramPrefetches = new Set();
@@ -604,51 +609,61 @@ export class App extends Component {
       return null;
     }
 
-    let mergedChunk = {
+    const incomingChunk = {
       start: Math.max(0, Math.floor(start)),
       end: Math.max(0, Math.floor(start)) + data.length,
       data: data.slice(),
+      incoming: true,
     };
     const nextCache = [];
-
-    this.spectrogramChunkCache
-      .slice()
+    [
+      ...this.spectrogramChunkCache.map((chunk) => ({
+        ...chunk,
+        incoming: false,
+      })),
+      incomingChunk,
+    ]
       .sort((left, right) => left.start - right.start)
       .forEach((chunk) => {
-        if (
-          chunk.end < mergedChunk.start ||
-          chunk.start > mergedChunk.end
-        ) {
-          nextCache.push(chunk);
+        const previous = nextCache[nextCache.length - 1];
+        if (!previous || chunk.start > previous.end) {
+          nextCache.push({
+            start: chunk.start,
+            end: chunk.end,
+            data: chunk.data.slice(),
+            containsIncoming: chunk.incoming,
+          });
           return;
         }
 
-        const mergedStart = Math.min(chunk.start, mergedChunk.start);
-        const mergedEnd = Math.max(chunk.end, mergedChunk.end);
-        const mergedData = new Array(mergedEnd - mergedStart);
-        const copyIntoMerged = (sourceChunk, overwrite = false) => {
-          const offset = sourceChunk.start - mergedStart;
-          for (let index = 0; index < sourceChunk.data.length; index += 1) {
-            if (overwrite || mergedData[offset + index] === undefined) {
-              mergedData[offset + index] = sourceChunk.data[index];
-            }
+        const mergedEnd = Math.max(previous.end, chunk.end);
+        if (mergedEnd > previous.end) {
+          previous.data.length = mergedEnd - previous.start;
+          previous.end = mergedEnd;
+        }
+        const targetOffset = chunk.start - previous.start;
+        for (let index = 0; index < chunk.data.length; index += 1) {
+          const targetIndex = targetOffset + index;
+          if (chunk.incoming || previous.data[targetIndex] === undefined) {
+            previous.data[targetIndex] = chunk.data[index];
           }
-        };
-
-        copyIntoMerged(chunk);
-        copyIntoMerged(mergedChunk, true);
-        mergedChunk = {
-          start: mergedStart,
-          end: mergedEnd,
-          data: mergedData,
-        };
+        }
+        previous.containsIncoming =
+          previous.containsIncoming || chunk.incoming;
       });
 
-    nextCache.push(mergedChunk);
-    this.spectrogramChunkCache = nextCache.sort(
-      (left, right) => left.start - right.start
+    const mergedIncoming =
+      nextCache.find((chunk) => chunk.containsIncoming) || null;
+    this.spectrogramChunkCache = nextCache.map(
+      ({ containsIncoming, ...chunk }) => chunk
     );
-    return mergedChunk;
+    return mergedIncoming
+      ? {
+          start: mergedIncoming.start,
+          end: mergedIncoming.end,
+          data: mergedIncoming.data,
+        }
+      : null;
   };
 
   findCachedSpectrogramChunk = (start, end) => {
@@ -656,8 +671,8 @@ export class App extends Component {
     return (
       this.spectrogramChunkCache.find(
         (chunk) =>
-          chunk.start <= range.start + SPECTROGRAM_CACHE_TOLERANCE_FRAMES &&
-          chunk.end >= range.end - SPECTROGRAM_CACHE_TOLERANCE_FRAMES
+          chunk.start <= range.start &&
+          chunk.end >= range.end
       ) || null
     );
   };
@@ -1033,6 +1048,8 @@ export class App extends Component {
 
   setRecording = (specData, waveData) => {
     this.spectrogramRequestId += 1;
+    this.clearSpectrogramCache();
+    this.storeSpectrogramChunk(0, specData);
     this.setVisibleSpectrogramWindowRef(0, specData.length);
     this.setState({
       specLoading: false,
@@ -1052,6 +1069,7 @@ export class App extends Component {
     }
 
     this.spectrogramRequestId += 1;
+    this.clearSpectrogramCache();
     this.setVisibleSpectrogramWindowRef(0, 0);
     this.stopPlayback();
 
@@ -1457,6 +1475,8 @@ export class App extends Component {
   };
 
   loadChunkRange = (start, end) => {
+    window.clearTimeout(this.spectrogramWindowLoadTimer);
+    this.spectrogramWindowLoadTimer = null;
     const { selectedProject, selectedRecording } = this.state;
     if (selectedRecording == null) {
       return Promise.resolve(false);
@@ -1464,14 +1484,29 @@ export class App extends Component {
 
     const range = this.normalizeSpectrogramRange(start, end);
     if (
-      this.state.specStart === range.start &&
-      this.state.specEnd === range.end &&
+      this.state.specStart <= range.start &&
+      this.state.specEnd >= range.end &&
       Array.isArray(this.state.specData) &&
-      this.state.specData.length === Math.max(range.end - range.start, 0)
+      this.state.specData.length > 0
     ) {
+      this.prefetchSpectrogramAround(range.start, range.end);
       return Promise.resolve(true);
     }
 
+    const cachedChunk = this.findCachedSpectrogramChunk(range.start, range.end);
+    if (cachedChunk) {
+      this.applySpectrogramChunkState(cachedChunk, range.start, range.end);
+      this.prefetchSpectrogramAround(range.start, range.end);
+      return Promise.resolve(true);
+    }
+
+    const totalFrames = Math.max(this.getSpectrogramTotalFrames(), range.end);
+    const bufferFrames = this.getSpectrogramBufferFrames(range.end - range.start);
+    const extraFrames = Math.max(bufferFrames - (range.end - range.start), 0);
+    const requestRange = this.normalizeSpectrogramRange(
+      Math.max(0, range.start - Math.floor(extraFrames / 2)),
+      Math.min(totalFrames, range.end + Math.ceil(extraFrames / 2))
+    );
     const requestId = this.spectrogramRequestId + 1;
     this.spectrogramRequestId = requestId;
     this.setState((current) => ({
@@ -1482,8 +1517,8 @@ export class App extends Component {
       backend.get_chunk(
         selectedProject,
         selectedRecording,
-        range.start,
-        range.end
+        requestRange.start,
+        requestRange.end
       )((data) => {
         if (requestId !== this.spectrogramRequestId) {
           resolve(false);
@@ -1503,12 +1538,15 @@ export class App extends Component {
           return;
         }
 
-        this.setState({
-          specData: data,
-          specLoading: false,
-          specStart: range.start,
-          specEnd: range.start + data.length,
-        }, () => resolve(true));
+        const chunk = this.storeSpectrogramChunk(requestRange.start, data);
+        if (!chunk) {
+          this.setState({ specLoading: false }, () => resolve(false));
+          return;
+        }
+
+        this.applySpectrogramChunkState(chunk, range.start, range.end);
+        this.prefetchSpectrogramAround(range.start, range.end);
+        resolve(chunk.start <= range.start && chunk.end >= range.end);
       }).catch((error) => {
         console.error("Failed to load spectrogram chunk", error);
         if (requestId === this.spectrogramRequestId) {
@@ -1525,6 +1563,15 @@ export class App extends Component {
     }
 
     const nextRange = this.setVisibleSpectrogramWindowRef(start, end);
+    window.clearTimeout(this.spectrogramWindowLoadTimer);
+    this.spectrogramWindowLoadTimer = null;
+    const windowUnchanged =
+      Math.abs((this.state.specViewStart ?? 0) - nextRange.start) < 0.5 &&
+      Math.abs((this.state.specViewEnd ?? 0) - nextRange.end) < 0.5;
+    if (windowUnchanged) {
+      return;
+    }
+
     if (this.state.playPause) {
       this.stopPlayback();
     }
@@ -1543,7 +1590,24 @@ export class App extends Component {
       };
     });
 
-    this.loadChunkRange(nextRange.start, nextRange.end);
+    const cachedChunk = this.findCachedSpectrogramChunk(
+      nextRange.start,
+      nextRange.end
+    );
+    if (cachedChunk) {
+      this.applySpectrogramChunkState(
+        cachedChunk,
+        nextRange.start,
+        nextRange.end
+      );
+      this.prefetchSpectrogramAround(nextRange.start, nextRange.end);
+      return;
+    }
+
+    this.spectrogramWindowLoadTimer = window.setTimeout(() => {
+      this.spectrogramWindowLoadTimer = null;
+      this.loadChunkRange(nextRange.start, nextRange.end);
+    }, SPECTROGRAM_WINDOW_LOAD_DEBOUNCE_MS);
   };
   handleClassifierChange = (event, selectedOptions, reason, details) => {
     const nextClassifierKeys = nextClassifierKeysFromSelection(

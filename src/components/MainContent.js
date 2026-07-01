@@ -169,9 +169,16 @@ const MainContent = ({
     confidenceThreshold,
     resultLimit
   );
-  const boundingBoxes = Array.isArray(classification?.boxes)
-    ? classification.boxes
-    : [];
+  const classificationModelKey = String(
+    classification?.classifier_key || ""
+  )
+    .split(":")
+    .pop()
+    .toLowerCase();
+  const boundingBoxes =
+    classificationModelKey !== "bat" && Array.isArray(classification?.boxes)
+      ? classification.boxes
+      : [];
   const hasBoundingBoxes = boundingBoxes.length > 0;
   const hasVisibleWindow = hasRecording && specData.length > 0;
   const showSpectrogramLoader = specLoading && specData.length === 0;
@@ -288,8 +295,8 @@ const MainContent = ({
                 waveData={waveData}
                 maxF={
                   recordingData.samplerate
-                    ? (257 / recordingData.samplerate) * 2000
-                    : (257 / 220500) * 2000
+                    ? 512000 / recordingData.samplerate
+                    : 512000 / 220500
                 }
                 maxS={
                   recordingData.samplerate

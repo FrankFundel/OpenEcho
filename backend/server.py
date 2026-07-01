@@ -393,6 +393,24 @@ def _write_windowed_audio(recording_path, window_range):
   return temp_file.name
 
 
+def _offset_classification_boxes(classification, offset_seconds):
+  if not isinstance(classification, dict) or not offset_seconds:
+    return
+
+  boxes = classification.get("boxes")
+  if not isinstance(boxes, list):
+    return
+
+  for box in boxes:
+    if not isinstance(box, dict):
+      continue
+    for key in ("start", "end"):
+      try:
+        box[key] = float(box[key]) + offset_seconds
+      except (KeyError, TypeError, ValueError):
+        continue
+
+
 def classification_label_names(classification):
   if not isinstance(classification, dict):
     return []
@@ -480,11 +498,17 @@ def predict_recording(project_index, recording_path, processing_mode, window_ran
   classifier_keys = [item["key"] for item in classifier_configs]
   processing_mode = _normalize_processing_mode(processing_mode)
   temp_path = None
+  window_offset_seconds = 0.0
 
   try:
     if processing_mode == "window":
       if window_range is None:
         raise ValueError("Window mode needs the currently visible spectrogram window.")
+      recording_info = sf.info(recording_path)
+      if recording_info.samplerate:
+        window_offset_seconds = (
+          window_range[0] * FRAME_STEP / recording_info.samplerate
+        )
       temp_path = _write_windowed_audio(recording_path, window_range)
 
     classifications = []
@@ -494,6 +518,7 @@ def predict_recording(project_index, recording_path, processing_mode, window_ran
         temp_path or recording_path,
         proclen=0,
       )
+      _offset_classification_boxes(classification, window_offset_seconds)
       classifications.append(classification)
 
     return (

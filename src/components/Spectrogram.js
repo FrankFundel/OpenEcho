@@ -332,7 +332,6 @@ const SPECTROGRAM_FRAGMENT_SOURCE = `#version 300 es
 precision highp float;
 
 uniform sampler2D uTexture;
-uniform float uLoadedStart;
 uniform float uViewStart;
 uniform float uViewSpan;
 uniform float uViewRowStart;
@@ -373,15 +372,18 @@ void main() {
 
   float viewX = clamp(vUv.x, 0.0, 1.0);
   float viewY = clamp(vUv.y, 0.0, 1.0);
-  float viewColumnSpan = max(uViewSpan - 1.0, 0.0);
-  float viewRowSpan = max(uViewRowSpan - 1.0, 0.0);
-  float localColumn = (uViewStart - uLoadedStart) + viewX * viewColumnSpan;
-  if (localColumn < 0.0 || localColumn > uTextureSize.x - 1.0) {
+  // View coordinates describe frame/bin boundaries. Sample the cell beneath
+  // each pixel so overlays using those same boundaries stay exactly aligned.
+  float localColumn = floor(
+    uViewStart + min(viewX, 0.999999) * uViewSpan
+  );
+  if (localColumn < 0.0 || localColumn >= uTextureSize.x) {
     outColor = vec4(0.07, 0.07, 0.09, 1.0);
     return;
   }
 
-  float localRow = uViewRowStart + viewY * viewRowSpan;
+  float localRow = uViewRowStart + viewY * uViewRowSpan;
+  localRow = clamp(localRow, 0.0, uTextureSize.y - 1.0);
   float texU = (localColumn + 0.5) / uTextureSize.x;
   float texV = (localRow + 0.5) / uTextureSize.y;
   float intensity = texture(uTexture, vec2(texU, texV)).r;
@@ -847,7 +849,7 @@ const Spectrogram = ({
         clampToLoaded ? propsRef.current.offset : 0,
         clampToLoaded
           ? propsRef.current.offset + propsRef.current.data.length - 1
-          : Math.max(getTotalFrames() - 1, 1),
+          : Math.max(getTotalFrames(), 1),
       ),
       rowIndex: clamp(
         view.rowStart + yRatio * (view.rowEnd - view.rowStart),
@@ -872,7 +874,10 @@ const Spectrogram = ({
     const band = getWaveformBand(layout, view);
     const startDistance = Math.abs(pointX - band.x);
     const endDistance = Math.abs(pointX - (band.x + band.width));
-    const hitPadding = WAVEFORM_EDGE_HIT_PIXELS;
+    const hitPadding = Math.min(
+      WAVEFORM_EDGE_HIT_PIXELS,
+      Math.max(2, band.width * 0.2),
+    );
 
     if (
       pointX >= band.x - hitPadding &&
@@ -891,7 +896,17 @@ const Spectrogram = ({
   };
 
   const getDisplayedView = () => {
-    return getCanonicalView();
+    const current = viewRef.current;
+    return clampRecordingView(
+      current.start,
+      current.end,
+      current.rowStart,
+      current.rowEnd,
+      {
+        minFrames: 1,
+        minRows: 1,
+      },
+    );
   };
 
   const getActiveWaveformView = () => {
@@ -1045,7 +1060,7 @@ const Spectrogram = ({
       const pixelSpectrum = toDeviceRect(layout.spectrum, dpr, height);
       const current = propsRef.current;
       const rows = current.data[0]?.length || 0;
-      const view = getCanonicalView();
+      const view = getDisplayedView();
       viewRef.current = view;
 
       const { gl } = glState;
@@ -1071,8 +1086,10 @@ const Spectrogram = ({
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, glState.spectrogramTexture);
         gl.uniform1i(glState.spectrogramUniforms.texture, 0);
-        gl.uniform1f(glState.spectrogramUniforms.loadedStart, current.offset);
-        gl.uniform1f(glState.spectrogramUniforms.viewStart, view.start);
+        gl.uniform1f(
+          glState.spectrogramUniforms.viewStart,
+          view.start - current.offset,
+        );
         gl.uniform1f(
           glState.spectrogramUniforms.viewSpan,
           view.end - view.start,
@@ -1499,10 +1516,6 @@ const Spectrogram = ({
         },
         spectrogramUniforms: {
           texture: gl.getUniformLocation(spectrogramProgram, "uTexture"),
-          loadedStart: gl.getUniformLocation(
-            spectrogramProgram,
-            "uLoadedStart",
-          ),
           viewStart: gl.getUniformLocation(spectrogramProgram, "uViewStart"),
           viewSpan: gl.getUniformLocation(spectrogramProgram, "uViewSpan"),
           viewRowStart: gl.getUniformLocation(
@@ -1568,7 +1581,10 @@ const Spectrogram = ({
       return;
     }
 
-    viewRef.current = getCanonicalView();
+    viewRef.current = getCanonicalView(
+      viewRef.current.rowStart,
+      viewRef.current.rowEnd,
+    );
     scheduleDrawRef.current?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleStart, visibleEnd]);
@@ -1599,7 +1615,7 @@ const Spectrogram = ({
 
     const rows = data[0]?.length || 1;
     const maxRow = Math.max(rows - 1, 1);
-    const currentView = getCanonicalView();
+    const currentView = getDisplayedView();
     const rowSpan = clamp(
       currentView.rowEnd - currentView.rowStart,
       1,
@@ -1760,7 +1776,7 @@ const Spectrogram = ({
           Math.max(waveformRect.width, 1)) *
         totalFrames;
       const clampedWindow = clampWaveformWindow(
-        frame,
+        Math.min(frame, interaction.viewEnd - 1),
         interaction.viewEnd,
         "end",
       );
@@ -1787,7 +1803,7 @@ const Spectrogram = ({
         totalFrames;
       const clampedWindow = clampWaveformWindow(
         interaction.viewStart,
-        frame,
+        Math.max(frame, interaction.viewStart + 1),
         "start",
       );
       interaction.waveformSelection = {
@@ -1865,6 +1881,10 @@ const Spectrogram = ({
   };
 
   const handlePointerDown = (event) => {
+    if (!event.isPrimary || event.button !== 0) {
+      return;
+    }
+
     const layout = getLayoutForPointer();
     const point = getPointerPosition(event);
     if (!layout || !point) {
@@ -1877,6 +1897,8 @@ const Spectrogram = ({
     interaction.startY = point.y;
     interaction.moved = false;
     interaction.spectrogramSelection = null;
+    interaction.waveformSelection = null;
+    event.preventDefault();
 
     if (isPointInside(layout.spectrogram, point.x, point.y)) {
       const specPoint = getSpectrogramPoint(layout, point, viewRef.current, {
@@ -1948,8 +1970,16 @@ const Spectrogram = ({
     }
   };
 
-  const handlePointerUp = () => {
+  const finishPointerInteraction = (event, commit = true) => {
     const interaction = interactionRef.current;
+    if (
+      event?.pointerId != null &&
+      interaction.pointerId !== null &&
+      event.pointerId !== interaction.pointerId
+    ) {
+      return;
+    }
+
     if (
       interaction.pointerId !== null &&
       containerRef.current?.hasPointerCapture?.(interaction.pointerId)
@@ -1957,7 +1987,11 @@ const Spectrogram = ({
       containerRef.current.releasePointerCapture(interaction.pointerId);
     }
 
-    if (interaction.dragMode === "spectrogram-zoom" && interaction.moved) {
+    if (
+      commit &&
+      interaction.dragMode === "spectrogram-zoom" &&
+      interaction.moved
+    ) {
       const selection = interaction.spectrogramSelection;
       if (selection) {
         const nextView = clampRecordingView(
@@ -1982,6 +2016,7 @@ const Spectrogram = ({
     }
 
     if (
+      commit &&
       (interaction.dragMode === "waveform-move" ||
         interaction.dragMode === "waveform-resize-start" ||
         interaction.dragMode === "waveform-resize-end") &&
@@ -2000,6 +2035,7 @@ const Spectrogram = ({
         anchorMode,
       );
     } else if (
+      commit &&
       interaction.dragMode === "waveform-select" &&
       interaction.waveformSelection
     ) {
@@ -2018,7 +2054,11 @@ const Spectrogram = ({
         );
         requestWaveformWindow(centeredStart, centeredStart + span, "center");
       }
-    } else if (interaction.dragMode === "waveform-move" && !interaction.moved) {
+    } else if (
+      commit &&
+      interaction.dragMode === "waveform-move" &&
+      !interaction.moved
+    ) {
       const span = Math.max(interaction.viewEnd - interaction.viewStart, 1);
       const totalFrames = Math.max(getTotalFrames(), 1);
       const centeredStart = clamp(
@@ -2038,6 +2078,14 @@ const Spectrogram = ({
     interaction.moved = false;
     setContainerCursor("");
     scheduleDraw();
+  };
+
+  const handlePointerUp = (event) => {
+    finishPointerInteraction(event, true);
+  };
+
+  const handlePointerCancel = (event) => {
+    finishPointerInteraction(event, false);
   };
 
   const handlePointerLeave = () => {
@@ -2114,11 +2162,16 @@ const Spectrogram = ({
       );
     }
 
+    const xWindowChanged =
+      Math.abs(nextView.start - view.start) >= 0.5 ||
+      Math.abs(nextView.end - view.end) >= 0.5;
     viewRef.current = nextView;
     if (!hoverRef.current.active) {
       setSpectrumFrame((nextView.start + nextView.end) / 2);
     }
-    visibleWindowChangeRef.current?.(nextView);
+    if (xWindowChanged) {
+      visibleWindowChangeRef.current?.(nextView);
+    }
     scheduleDraw();
   };
 
@@ -2154,7 +2207,7 @@ const Spectrogram = ({
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
       onPointerLeave={handlePointerLeave}
       onWheel={handleWheel}
       onDoubleClick={handleDoubleClick}
