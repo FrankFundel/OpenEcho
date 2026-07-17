@@ -8,20 +8,30 @@ import Avatar from "@mui/material/Avatar";
 import Badge from "@mui/material/Badge";
 import Button from "@mui/material/Button";
 import Box from "@mui/material/Box";
+import IconButton from "@mui/material/IconButton";
+import ListItemIcon from "@mui/material/ListItemIcon";
+import Menu from "@mui/material/Menu";
+import MenuItem from "@mui/material/MenuItem";
 import TextField from "@mui/material/TextField";
 import FolderIcon from "@mui/icons-material/Folder";
+import ImportOutlineIcon from "@mui/icons-material/FileUploadOutlined";
+import MoreVertIcon from "@mui/icons-material/MoreVert";
 
 const ProjectSidebar = ({
   projects,
   selectedProject,
   projectFilter,
+  projectActionsMenu,
   onProjectFilterChange,
   onSelectProject,
   onOpenCreateProject,
+  onImportWhombat,
+  onOpenProjectActionsMenu,
+  onCloseProjectActionsMenu,
   onProjectContextMenu,
 }) => (
   <Box className="paneInner">
-    <Box className="sidebarSearch">
+    <Box className="sidebarSearch projectSearchBar">
       <TextField
         size="small"
         fullWidth
@@ -29,6 +39,24 @@ const ProjectSidebar = ({
         value={projectFilter}
         onChange={onProjectFilterChange}
       />
+      <IconButton
+        aria-label="Project actions"
+        onClick={onOpenProjectActionsMenu}
+      >
+        <MoreVertIcon />
+      </IconButton>
+      <Menu
+        anchorEl={projectActionsMenu}
+        open={Boolean(projectActionsMenu)}
+        onClose={onCloseProjectActionsMenu}
+      >
+        <MenuItem onClick={onImportWhombat}>
+          <ListItemIcon>
+            <ImportOutlineIcon fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>Import Whombat JSON</ListItemText>
+        </MenuItem>
+      </Menu>
     </Box>
     <List className="sidebarScroll">
       {projects.map(({ project, index }) => (
@@ -58,7 +86,7 @@ const ProjectSidebar = ({
       ))}
     </List>
     <Box className="sidebarActions" textAlign="center">
-      <Button onClick={onOpenCreateProject} variant="contained">
+      <Button onClick={onOpenCreateProject} variant="contained" fullWidth>
         Create Project
       </Button>
     </Box>

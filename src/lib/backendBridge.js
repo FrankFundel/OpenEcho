@@ -313,16 +313,31 @@ class BackendBridge {
     );
   }
 
-  async chooseExportPath(defaultName) {
+  async chooseExportPath(
+    defaultName,
+    filters = [{ name: "CSV", extensions: ["csv"] }]
+  ) {
     if (isTauriRuntime()) {
       const { save } = await import("@tauri-apps/plugin-dialog");
       return save({
         defaultPath: defaultName,
-        filters: [{ name: "CSV", extensions: ["csv"] }],
+        filters,
       });
     }
 
     return window.prompt("Enter an absolute export path.", defaultName) || null;
+  }
+
+  async chooseImportPath(filters = [{ name: "JSON", extensions: ["json"] }]) {
+    if (isTauriRuntime()) {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      return open({
+        multiple: false,
+        filters,
+      });
+    }
+
+    return window.prompt("Enter an absolute Whombat JSON path.") || null;
   }
 
   export_csv(projectIndex, defaultName = "export.csv") {
@@ -333,6 +348,38 @@ class BackendBridge {
       }
 
       return this.request(`/api/projects/${projectIndex}/export`, {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      });
+    });
+  }
+
+  export_whombat(projectIndex, defaultName = "project.whombat.json") {
+    return this.callbackify(async () => {
+      const path = await this.chooseExportPath(defaultName, [
+        { name: "Whombat JSON", extensions: ["json"] },
+      ]);
+      if (!path) {
+        return false;
+      }
+
+      return this.request(`/api/projects/${projectIndex}/export/whombat`, {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      });
+    });
+  }
+
+  import_whombat() {
+    return this.callbackify(async () => {
+      const path = await this.chooseImportPath([
+        { name: "Whombat JSON", extensions: ["json"] },
+      ]);
+      if (!path) {
+        return false;
+      }
+
+      return this.request("/api/projects/import/whombat", {
         method: "POST",
         body: JSON.stringify({ path }),
       });

@@ -112,18 +112,55 @@ const isPointInside = (rect, x, y) =>
   y >= rect.y &&
   y <= rect.y + rect.height;
 
-const flattenSpectrogram = (data) => {
-  const width = data.length || 0;
-  const height = width > 0 && Array.isArray(data[0]) ? data[0].length : 0;
+const flattenSpectrogram = (data, start = 0, end = data.length) => {
+  const firstColumn = clamp(Math.floor(start), 0, data.length);
+  const lastColumn = clamp(Math.ceil(end), firstColumn, data.length);
+  const width = lastColumn - firstColumn;
+  const height =
+    width > 0 && Array.isArray(data[firstColumn])
+      ? data[firstColumn].length
+      : 0;
   const pixels = new Uint8Array(width * height);
 
   for (let row = 0; row < height; row += 1) {
     for (let column = 0; column < width; column += 1) {
-      pixels[row * width + column] = data[column]?.[row] ?? 0;
+      pixels[row * width + column] =
+        data[firstColumn + column]?.[row] ?? 0;
     }
   }
 
   return { width, height, pixels };
+};
+
+const getTextureSlice = (dataLength, offset, view, maxTextureWidth) => {
+  const widthLimit = Math.max(1, Math.floor(maxTextureWidth));
+  if (dataLength <= widthLimit) {
+    return { start: 0, end: dataLength, globalStart: offset };
+  }
+
+  const localViewStart = clamp(Math.floor(view.start - offset), 0, dataLength);
+  const localViewEnd = clamp(
+    Math.ceil(view.end - offset),
+    localViewStart,
+    dataLength,
+  );
+  const centeredStart = Math.floor(
+    (localViewStart + localViewEnd - widthLimit) / 2,
+  );
+  let start = clamp(centeredStart, 0, dataLength - widthLimit);
+
+  // Keep the complete visible range in the texture whenever it can fit.
+  if (localViewEnd - localViewStart <= widthLimit) {
+    start = Math.min(start, localViewStart);
+    start = Math.max(start, localViewEnd - widthLimit);
+    start = clamp(start, 0, dataLength - widthLimit);
+  }
+
+  return {
+    start,
+    end: start + widthLimit,
+    globalStart: offset + start,
+  };
 };
 
 const buildWaveformPoints = (waveData, totalFrames) => {
@@ -749,9 +786,10 @@ const Spectrogram = ({
       return;
     }
 
-    const snappedStart = Math.max(0, Math.floor(view.start));
-    const snappedEnd = Math.max(snappedStart + 1, Math.ceil(view.end));
-    onVisibleWindowChange(snappedStart, snappedEnd);
+    onVisibleWindowChange(
+      Math.max(0, view.start),
+      Math.max(view.start + 1, view.end),
+    );
   };
 
   const clampView = (
@@ -818,7 +856,6 @@ const Spectrogram = ({
     return clampRecordingView(start, end, rowStart, rowEnd, {
       minFrames: 1,
       minRows: 1,
-      snapFrames: true,
     });
   };
 
@@ -1017,6 +1054,50 @@ const Spectrogram = ({
     cursorRef.current = cursor;
   };
 
+  const ensureSpectrogramTexture = (glState, current, view) => {
+    const dataLength = current.data.length;
+    if (dataLength === 0) {
+      glState.textureWidth = 0;
+      glState.textureHeight = 0;
+      glState.textureGlobalStart = current.offset;
+      glState.sourceData = current.data;
+      glState.sourceOffset = current.offset;
+      return;
+    }
+
+    const slice = getTextureSlice(
+      dataLength,
+      current.offset,
+      view,
+      glState.maxTextureWidth,
+    );
+    const textureMatchesSlice =
+      glState.sourceData === current.data &&
+      glState.sourceOffset === current.offset &&
+      glState.textureGlobalStart === slice.globalStart &&
+      glState.textureWidth === slice.end - slice.start;
+    if (textureMatchesSlice) {
+      return;
+    }
+
+    const flattened = flattenSpectrogram(current.data, slice.start, slice.end);
+    if (flattened.width > 0 && flattened.height > 0) {
+      updateTexture(
+        glState.gl,
+        glState.spectrogramTexture,
+        flattened.width,
+        flattened.height,
+        flattened.pixels,
+      );
+    }
+
+    glState.textureWidth = flattened.width;
+    glState.textureHeight = flattened.height;
+    glState.textureGlobalStart = slice.globalStart;
+    glState.sourceData = current.data;
+    glState.sourceOffset = current.offset;
+  };
+
   scheduleDrawRef.current = () => {
     if (rafRef.current !== null) {
       return;
@@ -1062,6 +1143,7 @@ const Spectrogram = ({
       const rows = current.data[0]?.length || 0;
       const view = getDisplayedView();
       viewRef.current = view;
+      ensureSpectrogramTexture(glState, current, view);
 
       const { gl } = glState;
       gl.viewport(0, 0, canvasWidth, canvasHeight);
@@ -1088,7 +1170,7 @@ const Spectrogram = ({
         gl.uniform1i(glState.spectrogramUniforms.texture, 0);
         gl.uniform1f(
           glState.spectrogramUniforms.viewStart,
-          view.start - current.offset,
+          view.start - glState.textureGlobalStart,
         );
         gl.uniform1f(
           glState.spectrogramUniforms.viewSpan,
@@ -1506,6 +1588,10 @@ const Spectrogram = ({
         spectrogramTexture: createTexture(gl),
         textureWidth: 0,
         textureHeight: 0,
+        textureGlobalStart: 0,
+        maxTextureWidth: gl.getParameter(gl.MAX_TEXTURE_SIZE),
+        sourceData: null,
+        sourceOffset: null,
         quadBuffer: gl.createBuffer(),
         waveformBuffer: gl.createBuffer(),
         waveformCount: 0,
@@ -1593,25 +1679,16 @@ const Spectrogram = ({
     scheduleDrawRef.current?.();
   }, [boxes, showBoxes]);
 
-  // Rebuild the WebGL texture while preserving the canonical x-window.
+  // Mark the texture stale while preserving the canonical x-window. The draw
+  // path uploads only the GPU-safe slice that contains the visible frames.
   useEffect(() => {
     const glState = glStateRef.current;
     if (!glState) {
       return;
     }
 
-    const flattened = flattenSpectrogram(data);
-    glState.textureWidth = flattened.width;
-    glState.textureHeight = flattened.height;
-    if (flattened.width > 0 && flattened.height > 0) {
-      updateTexture(
-        glState.gl,
-        glState.spectrogramTexture,
-        flattened.width,
-        flattened.height,
-        flattened.pixels,
-      );
-    }
+    glState.sourceData = null;
+    glState.sourceOffset = null;
 
     const rows = data[0]?.length || 1;
     const maxRow = Math.max(rows - 1, 1);
@@ -2163,8 +2240,8 @@ const Spectrogram = ({
     }
 
     const xWindowChanged =
-      Math.abs(nextView.start - view.start) >= 0.5 ||
-      Math.abs(nextView.end - view.end) >= 0.5;
+      Math.abs(nextView.start - view.start) > 0.0001 ||
+      Math.abs(nextView.end - view.end) > 0.0001;
     viewRef.current = nextView;
     if (!hoverRef.current.active) {
       setSpectrumFrame((nextView.start + nextView.end) / 2);

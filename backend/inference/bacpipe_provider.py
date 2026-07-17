@@ -248,7 +248,7 @@ def bat_layercam_reshape(tensor):
   return None
 
 
-def layercam_maps(model, input_tensor, class_indexes):
+def layercam_maps(model, input_tensor, class_indexes, upsample_to_input=True):
   import torch
   import torch.nn.functional as functional
 
@@ -302,11 +302,12 @@ def layercam_maps(model, input_tensor, class_indexes):
         if gradient is None:
           continue
         cam = (torch.relu(gradient) * torch.relu(activation)).sum(dim=1, keepdim=True)
-        cam = functional.interpolate(
-          cam,
-          size=output_size,
-          mode="nearest",
-        )
+        if upsample_to_input:
+          cam = functional.interpolate(
+            cam,
+            size=output_size,
+            mode="nearest",
+          )
         layer_cams.append(cam.squeeze(1).detach().cpu().numpy())
 
       if layer_cams:
@@ -328,6 +329,9 @@ def boxes_from_cam_map(
   class_score,
   source,
   clip_end=None,
+  time_patch_duration=None,
+  time_patch_stride=None,
+  min_area=CAM_BOX_MIN_AREA,
 ):
   from scipy import ndimage
 
@@ -352,11 +356,17 @@ def boxes_from_cam_map(
     time_slice, frequency_slice = component_slice
     component = component_map[component_slice] == component_index
     area = int(component.sum())
-    if area < CAM_BOX_MIN_AREA:
+    if area < min_area:
       continue
 
-    start = segment_offset + (time_slice.start / time_count) * segment_duration
-    end = segment_offset + (time_slice.stop / time_count) * segment_duration
+    if time_patch_duration is not None and time_patch_stride is not None:
+      start = segment_offset + time_slice.start * time_patch_stride
+      end = segment_offset + (
+        (time_slice.stop - 1) * time_patch_stride + time_patch_duration
+      )
+    else:
+      start = segment_offset + (time_slice.start / time_count) * segment_duration
+      end = segment_offset + (time_slice.stop / time_count) * segment_duration
     if clip_end is not None:
       end = min(end, clip_end)
     if end <= start:
@@ -838,6 +848,7 @@ class BacpipeClassifierService:
         bat2_model.model,
         batch,
         class_indexes,
+        upsample_to_input=False,
       )
       segment_probabilities.append(probabilities)
 
@@ -855,6 +866,9 @@ class BacpipeClassifierService:
             class_score=probabilities[0, class_index],
             source="bat2_layercam",
             clip_end=audio_duration,
+            time_patch_duration=(bat2_model.model.patch_len * 128) / BAT2_SAMPLE_RATE,
+            time_patch_stride=(bat2_model.model.patch_skip * 128) / BAT2_SAMPLE_RATE,
+            min_area=1,
           )
         )
 

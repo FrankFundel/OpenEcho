@@ -81,7 +81,7 @@ const EMPTY_RECORDING = {
   species: "",
 };
 
-const SPECTROGRAM_PREFETCH_SECONDS = 8;
+const SPECTROGRAM_PREFETCH_SECONDS = 4;
 const SPECTROGRAM_WINDOW_LOAD_DEBOUNCE_MS = 80;
 
 const splitSpeciesText = (value) =>
@@ -197,16 +197,28 @@ const resolvePredictionClassifierKey = (
     )
   );
 
-  if (preferredKey && normalizedClassifierKeys.includes(preferredKey)) {
+  if (
+    preferredKey &&
+    normalizedClassifierKeys.includes(preferredKey) &&
+    (
+      classifications.length === 0 ||
+      classifications.some(
+        (classification) => classification.classifier_key === preferredKey
+      )
+    )
+  ) {
     return preferredKey;
   }
   if (availablePredictionKeys.length > 0) {
     return availablePredictionKeys[0];
   }
+  if (classifications.length > 0) {
+    return classifications[0].classifier_key;
+  }
   if (normalizedClassifierKeys.length > 0) {
     return normalizedClassifierKeys[0];
   }
-  return classifications[0]?.classifier_key || "";
+  return "";
 };
 
 const nextClassifierKeysFromSelection = (
@@ -399,6 +411,7 @@ export class App extends Component {
       projectTitle: "",
       projectDescription: "",
       projectContext: null,
+      projectActionsMenu: null,
       projectContextSelection: 0,
       selectedRecordings: [],
       specData: [],
@@ -500,8 +513,8 @@ export class App extends Component {
       ? totalFrames
       : null;
     const maxStart = boundedTotal != null ? Math.max(0, boundedTotal - 1) : Number.POSITIVE_INFINITY;
-    const rawStart = Math.floor(start);
-    const rawEnd = Math.ceil(end);
+    const rawStart = start;
+    const rawEnd = end;
     const nextStart = Math.min(Math.max(0, rawStart), maxStart);
     const nextEndRaw = Math.max(nextStart + 1, rawEnd);
     const nextEnd = boundedTotal != null ? Math.min(nextEndRaw, boundedTotal) : nextEndRaw;
@@ -613,68 +626,33 @@ export class App extends Component {
       start: Math.max(0, Math.floor(start)),
       end: Math.max(0, Math.floor(start)) + data.length,
       data: data.slice(),
-      incoming: true,
     };
-    const nextCache = [];
-    [
-      ...this.spectrogramChunkCache.map((chunk) => ({
-        ...chunk,
-        incoming: false,
-      })),
+    // Adjacent prefetches must stay separate. Merging them grows a single
+    // texture past WebGL's maximum width and leaves stale pixels paired with
+    // new coordinate metadata after the rejected upload.
+    this.spectrogramChunkCache = [
+      ...this.spectrogramChunkCache.filter(
+        (chunk) =>
+          !(
+            incomingChunk.start <= chunk.start &&
+            incomingChunk.end >= chunk.end
+          )
+      ),
       incomingChunk,
-    ]
-      .sort((left, right) => left.start - right.start)
-      .forEach((chunk) => {
-        const previous = nextCache[nextCache.length - 1];
-        if (!previous || chunk.start > previous.end) {
-          nextCache.push({
-            start: chunk.start,
-            end: chunk.end,
-            data: chunk.data.slice(),
-            containsIncoming: chunk.incoming,
-          });
-          return;
-        }
-
-        const mergedEnd = Math.max(previous.end, chunk.end);
-        if (mergedEnd > previous.end) {
-          previous.data.length = mergedEnd - previous.start;
-          previous.end = mergedEnd;
-        }
-        const targetOffset = chunk.start - previous.start;
-        for (let index = 0; index < chunk.data.length; index += 1) {
-          const targetIndex = targetOffset + index;
-          if (chunk.incoming || previous.data[targetIndex] === undefined) {
-            previous.data[targetIndex] = chunk.data[index];
-          }
-        }
-        previous.containsIncoming =
-          previous.containsIncoming || chunk.incoming;
-      });
-
-    const mergedIncoming =
-      nextCache.find((chunk) => chunk.containsIncoming) || null;
-    this.spectrogramChunkCache = nextCache.map(
-      ({ containsIncoming, ...chunk }) => chunk
-    );
-    return mergedIncoming
-      ? {
-          start: mergedIncoming.start,
-          end: mergedIncoming.end,
-          data: mergedIncoming.data,
-        }
-      : null;
+    ].sort((left, right) => left.start - right.start);
+    return incomingChunk;
   };
 
   findCachedSpectrogramChunk = (start, end) => {
     const range = this.normalizeSpectrogramRange(start, end);
-    return (
-      this.spectrogramChunkCache.find(
-        (chunk) =>
-          chunk.start <= range.start &&
-          chunk.end >= range.end
-      ) || null
+    const matches = this.spectrogramChunkCache.filter(
+      (chunk) => chunk.start <= range.start && chunk.end >= range.end
     );
+    matches.sort(
+      (left, right) =>
+        left.end - left.start - (right.end - right.start)
+    );
+    return matches[0] || null;
   };
 
   applySpectrogramChunkState = (chunk, viewStart, viewEnd) => {
@@ -1326,6 +1304,49 @@ export class App extends Component {
     });
   };
 
+  exportWhombat = () => {
+    const { projectContextSelection, projects } = this.state;
+    this.setState({ projectContext: null });
+    const projectTitle = projects[projectContextSelection].title;
+
+    backend.export_whombat(
+      projectContextSelection,
+      `${projectTitle}.whombat.json`
+    )((result) => {
+      if (result) {
+        this.openAlert(
+          "Successfully exported",
+          `${projectTitle} was exported as Whombat JSON.`
+        );
+      } else {
+        this.openAlert(
+          "Exporting unsuccessful",
+          `${projectTitle} could not be exported as Whombat JSON.`
+        );
+      }
+    }).catch((error) => {
+      console.error("Failed to export Whombat JSON", error);
+      this.openAlert("Exporting unsuccessful", error.message);
+    });
+  };
+
+  importWhombat = () => {
+    this.setState({ projectActionsMenu: null, projectContext: null });
+    backend.import_whombat()((result) => {
+      if (!result) {
+        return;
+      }
+      this.loadProjects();
+      this.openAlert(
+        "Successfully imported",
+        `${result.title || "Whombat project"} was imported.`
+      );
+    }).catch((error) => {
+      console.error("Failed to import Whombat JSON", error);
+      this.openAlert("Importing unsuccessful", error.message);
+    });
+  };
+
   playEnd = () => {
     this.playbackRequestId += 1;
     window.clearTimeout(this.playbackCompletionTimer);
@@ -1566,8 +1587,8 @@ export class App extends Component {
     window.clearTimeout(this.spectrogramWindowLoadTimer);
     this.spectrogramWindowLoadTimer = null;
     const windowUnchanged =
-      Math.abs((this.state.specViewStart ?? 0) - nextRange.start) < 0.5 &&
-      Math.abs((this.state.specViewEnd ?? 0) - nextRange.end) < 0.5;
+      Math.abs((this.state.specViewStart ?? 0) - nextRange.start) < 0.0001 &&
+      Math.abs((this.state.specViewEnd ?? 0) - nextRange.end) < 0.0001;
     if (windowUnchanged) {
       return;
     }
@@ -1578,8 +1599,8 @@ export class App extends Component {
 
     this.setState((current) => {
       if (
-        Math.abs((current.specViewStart ?? 0) - nextRange.start) < 0.5 &&
-        Math.abs((current.specViewEnd ?? 0) - nextRange.end) < 0.5
+        Math.abs((current.specViewStart ?? 0) - nextRange.start) < 0.0001 &&
+        Math.abs((current.specViewEnd ?? 0) - nextRange.end) < 0.0001
       ) {
         return null;
       }
@@ -1589,6 +1610,20 @@ export class App extends Component {
         specViewEnd: nextRange.end,
       };
     });
+
+    const normalizedRange = this.normalizeSpectrogramRange(
+      nextRange.start,
+      nextRange.end
+    );
+    if (
+      this.state.specStart <= normalizedRange.start &&
+      this.state.specEnd >= normalizedRange.end &&
+      Array.isArray(this.state.specData) &&
+      this.state.specData.length > 0
+    ) {
+      this.prefetchSpectrogramAround(nextRange.start, nextRange.end);
+      return;
+    }
 
     const cachedChunk = this.findCachedSpectrogramChunk(
       nextRange.start,
@@ -1776,6 +1811,7 @@ export class App extends Component {
       playPause,
       confirmDeleteDialog,
       projectContext,
+      projectActionsMenu,
       projectDescription,
       projectFilter,
       projectTitle,
@@ -1941,6 +1977,7 @@ export class App extends Component {
                 selectedProject={selectedProject}
                 onSelectProject={this.selectProject}
                 projectFilter={projectFilter}
+                projectActionsMenu={projectActionsMenu}
                 onProjectFilterChange={(event) =>
                   this.setState({ projectFilter: event.target.value })
                 }
@@ -1951,6 +1988,13 @@ export class App extends Component {
                     projectTitle: "",
                     projectDescription: "",
                   })
+                }
+                onImportWhombat={this.importWhombat}
+                onOpenProjectActionsMenu={(event) =>
+                  this.setState({ projectActionsMenu: event.currentTarget })
+                }
+                onCloseProjectActionsMenu={() =>
+                  this.setState({ projectActionsMenu: null })
                 }
                 onProjectContextMenu={this.handleProjectContext}
               />
@@ -2105,6 +2149,14 @@ export class App extends Component {
             </ListItemIcon>
             <ListItemText>
               <Typography>Export CSV</Typography>
+            </ListItemText>
+          </MenuItem>
+          <MenuItem onClick={this.exportWhombat}>
+            <ListItemIcon>
+              <ExportOutlineIcon fontSize="small" />
+            </ListItemIcon>
+            <ListItemText>
+              <Typography>Export Whombat JSON</Typography>
             </ListItemText>
           </MenuItem>
           <MenuItem onClick={this.openDeleteProjectDialog}>

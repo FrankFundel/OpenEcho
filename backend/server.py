@@ -30,6 +30,10 @@ from backend.project_store import (
   load_recording_classification as load_recording_classification_data,
   save_projects as save_project_data,
 )
+from backend.whombat_aoef import (
+  export_project as export_whombat_project_data,
+  import_project as import_whombat_project_data,
+)
 
 
 class EventBroker:
@@ -1096,6 +1100,29 @@ def export_csv(project_index: int, payload: ExportPayload):
     return True
   except Exception:
     return False
+
+
+@app.post("/api/projects/{project_index}/export/whombat")
+def export_whombat(project_index: int, payload: ExportPayload):
+  try:
+    with state_lock:
+      stored_projects = load_project_data(include_predictions=True)
+      project = stored_projects[project_index]
+    return export_whombat_project_data(project, project_index, payload.path)
+  except Exception as error:
+    raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+@app.post("/api/projects/import/whombat")
+def import_whombat(payload: ExportPayload):
+  try:
+    project = import_whombat_project_data(payload.path)
+    with state_lock:
+      projects.append(project)
+      save_project_data(projects)
+    return public_project_payload(project)
+  except Exception as error:
+    raise HTTPException(status_code=500, detail=str(error)) from error
 
 
 @app.post("/api/play")
